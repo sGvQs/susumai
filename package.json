@@ -19,6 +19,8 @@
     "build": "tsup",
     "test": "node --test",
     "typecheck": "tsc --noEmit",
+    "rehearse": "node rehearsal/rehearse.mjs",
+    "rehearse:teardown": "node rehearsal/rehearse.mjs teardown",
     "prepublishOnly": "npm run typecheck && npm run build && npm test"
   },
   "devDependencies": {
