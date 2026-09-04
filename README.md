@@ -5,10 +5,16 @@
 ## インストール
 
 ```
-npm i -g susumai
+npm i -g github:sGvQs/susumai
 ```
 
 Node.js >= 22.18 が必要です。
+
+このコマンドはリポジトリが public であることが前提です。private のままだと、インストールする各マシンに GitHub 認証（`gh auth` / SSH 鍵 / トークン）が必要になります。
+
+install 時に `prepare` スクリプトでビルド（`tsup`）が走るため、devDependencies が入る環境である必要があります。`NODE_ENV=production` や `npm config get omit` に `dev` が入っている環境では、`npm i -g --include=dev github:sGvQs/susumai` のように `--include=dev` を付けるか、その設定を一時的に外してください。
+
+特定のタグ／コミットに固定したい場合は `npm i -g github:sGvQs/susumai#<tag or sha>` と書けます。
 
 ## 設定
 
@@ -38,6 +44,11 @@ echo "要約して" | susumai       # パイプ入力
 `trycloudflare` の quick tunnel は検証用です（URL が揮発性・本番不可）。
 `deepseek-r1:32b` は 24GB 単機では非推奨です（`deepseek-r1:8b` を推奨）。
 
+`trycloudflare.com` のサブドメインは ISP や社内 DNS が丸ごとブロックすることがあります（`dig` で `REFUSED` や `not found` が返る。2026-09-04 に実際に踏みました）。
+その場合はそのマシンの DNS リゾルバを `1.1.1.1` / `8.8.8.8` に変更するか、quick tunnel をやめて named tunnel を使ってください。
+
 ## リポジトリ
 
-`package.json` の `repository`（`github:susum/susumai`）は未作成の可能性があります。
+https://github.com/sGvQs/susumai
+
+`dist/` は git に含めておらず、install 時に `prepare` でビルドされます。

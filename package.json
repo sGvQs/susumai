@@ -14,9 +14,10 @@
   "engines": {
     "node": ">=22.18"
   },
-  "repository": "github:susum/susumai",
+  "repository": "github:sGvQs/susumai",
   "scripts": {
     "build": "tsup",
+    "prepare": "npm run build",
     "test": "node --test",
     "typecheck": "tsc --noEmit",
     "rehearse": "node rehearsal/rehearse.mjs",
