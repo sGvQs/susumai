@@ -108,6 +108,59 @@ export function judgeDeadTunnel({ exitCode, elapsedMs, thresholdMs }) {
   };
 }
 
+/**
+ * トンネル検証のポーリング間隔（ms）。最初の 30 秒は 2 秒間隔、その後は 5 秒間隔。
+ * 固定値はこのバックオフ形状に必要な最小限だけ（総待ち時間は verifyTunnel 側で env 上書き可）。
+ */
+export function tunnelPollDelayMs(elapsedMs) {
+  return elapsedMs < 30_000 ? 2_000 : 5_000;
+}
+
+/** 待っても直らない＝リトライを打ち切って HALT すべきトンネル応答か。 */
+export function isTunnelFatalStatus(status) {
+  return status === 401;
+}
+
+/** この run が書いた使い捨て cloudflared ログのファイル名か（`cloudflared.<pid>.<ts>.log`）。 */
+export function isPerRunCloudflaredLog(filename) {
+  return /^cloudflared\.\d+\.\d+\.log$/.test(filename);
+}
+
+/**
+ * トンネル検証 1 回分の結果（fetch の cause code / HTTP ステータス / 本文先頭）を
+ * 人間向けの短評にする純関数。各リトライ行と HALT メッセージの両方で使う。
+ */
+export function describeTunnelProbe({ errCode, status, bodyPrefix } = {}) {
+  if (errCode) {
+    const map = {
+      ENOTFOUND: 'DNS 未伝播',
+      EAI_AGAIN: 'DNS 一時失敗（未伝播）',
+      ECONNREFUSED: '接続拒否（エッジ未確立?）',
+      ECONNRESET: '接続リセット',
+      UND_ERR_CONNECT_TIMEOUT: '接続タイムアウト',
+      UND_ERR_HEADERS_TIMEOUT: 'ヘッダ応答なし',
+      UND_ERR_SOCKET: 'ソケット切断',
+      AbortError: 'タイムアウト（5s 応答なし）',
+    };
+    return `${errCode} — ${map[errCode] ?? '接続失敗'}`;
+  }
+  if (typeof status === 'number') {
+    const note = {
+      200: '応答形状が想定と異なる',
+      401: 'トークン不一致?',
+      403: 'allowlist で遮断?',
+      404: 'パス不一致?',
+      502: 'エッジは到達、上流待ち',
+      503: 'エッジは到達、上流待ち',
+      504: 'エッジは到達、上流タイムアウト',
+      530: 'Cloudflare origin エラー',
+    }[status];
+    const b = bodyPrefix ? ` "${bodyPrefix}"` : '';
+    return note ? `${status} — ${note}${b}` : `HTTP ${status}${b}`;
+  }
+  return '不明';
+}
+
 /** proxy 同一性チェーン 第1段: :8787 の LISTEN プロセスが rehearsal proxy か。 */
 export function classifyProxyListener(psCommand) {
   const cmd = (psCommand || '').trim();
@@ -232,6 +285,8 @@ const state = {
   reusedCloudflaredPid: null,
   autoVerifyPassed: false,
   toreDown: false,
+  // トンネル伝播待ち HALT のときだけ true: 起動した子と隔離 .xdg を残して次回再利用させる。
+  keepStartedProcesses: false,
 };
 
 /** 自分が spawn した子だけをメモリ配列で保持（永続台帳なし）。 */
@@ -342,6 +397,44 @@ function isolatedToken() {
   return c && typeof c.token === 'string' && c.token ? c.token : null;
 }
 
+/** .xdg/ 直下の使い捨てログ（proxy.*.log / cloudflared.*.log 等）を消す。config.json は残す。 */
+function cleanXdgLogs() {
+  try {
+    for (const f of fs.readdirSync(XDG_DIR)) {
+      if (f.endsWith('.log')) fs.rmSync(path.join(XDG_DIR, f), { force: true });
+    }
+  } catch {
+    /* .xdg 無し */
+  }
+}
+
+/**
+ * .xdg/ に残っている使い捨て cloudflared ログから trycloudflare URL を復帰する。
+ * keep-HALT（伝播待ちで止めた run）が残した per-run ログ用。共有 tunnel.log は見ない。
+ * 複数あれば mtime が新しいものを優先。無ければ null。
+ */
+function urlFromCloudflaredLogs() {
+  let files;
+  try {
+    files = fs
+      .readdirSync(XDG_DIR)
+      .filter(isPerRunCloudflaredLog)
+      .map((f) => path.join(XDG_DIR, f))
+      .sort((a, b) => statSig(b).mtimeMs - statSig(a).mtimeMs);
+  } catch {
+    return null;
+  }
+  for (const p of files) {
+    try {
+      const u = extractTunnelUrl(fs.readFileSync(p, 'utf8'));
+      if (u) return u;
+    } catch {
+      /* skip */
+    }
+  }
+  return null;
+}
+
 // --- 子プロセス管理 --------------------------------------------------------
 function spawnTracked(name, cmd, args, opts = {}) {
   const child = spawn(cmd, args, {
@@ -360,13 +453,6 @@ function spawnTracked(name, cmd, args, opts = {}) {
   return child;
 }
 
-function forEachLine(stream, onLine) {
-  if (!stream) return null;
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-  rl.on('line', onLine);
-  return rl;
-}
-
 /**
  * autoTeardown — 自動経路（Enter / Ctrl+C / エラー / 正常完了 / 24h 無活動）共通。
  * メモリ保持 PID（自分の起動分）だけを kill する。pkill は呼ばない。
@@ -375,6 +461,19 @@ function forEachLine(stream, onLine) {
 async function autoTeardown() {
   if (state.toreDown) return;
   state.toreDown = true;
+
+  // トンネル伝播待ち HALT: 起動した子も隔離 .xdg も残す（次回 probe が再利用する）。
+  if (state.keepStartedProcesses) {
+    const kept = children
+      .filter((c) => c.child.exitCode == null && c.child.signalCode == null)
+      .map((c) => `${c.name} PID ${c.child.pid}`);
+    if (kept.length) {
+      warn(`  稼働継続: ${kept.join(' / ')}（伝播待ち。再実行で再利用）`);
+    }
+    warn(`  ${path.relative(REPO_ROOT, XDG_DIR)}/ は残置（同じトークンで再開するため）`);
+    warn('  完全撤収は `npm run rehearse:teardown -- --all`');
+    return;
+  }
 
   const alive = children.filter(
     (c) => c.child.exitCode == null && c.child.signalCode == null,
@@ -408,7 +507,11 @@ async function autoTeardown() {
       warn(`  .xdg 削除に失敗: ${e.message}`);
     }
   } else if (fs.existsSync(XDG_DIR)) {
-    warn(`  ${path.relative(REPO_ROOT, XDG_DIR)}/ は残置（再利用 proxy を壊さないため）`);
+    // .xdg（config.json）は残す（再利用 proxy を壊さない）が、使い捨てログは掃除する。
+    // 自分が spawn しなかった（＝proxy も cloudflared も再利用した）run では children が
+    // 空なので、前 run が残した .xdg/*.log も含めて glob で消す。
+    cleanXdgLogs();
+    warn(`  ${path.relative(REPO_ROOT, XDG_DIR)}/ は残置（再利用 proxy を壊さないため。*.log は掃除）`);
   }
 
   const survivors = [];
@@ -547,9 +650,10 @@ async function probeProxy() {
 /**
  * :8787 トンネルの cloudflared を解決する（Phase 1 で確定させる。build を数分回す前に
  * halt/対話入力を済ませるため）。
- * - 既存なし          → { action: 'start' }（Phase 3 で自分が起動）
- * - 既存あり・TTY      → その場で URL を対話入力 → { action: 'given', url, pid }
- * - 既存あり・非 TTY    → halt
+ * - 既存なし                       → { action: 'start' }（Phase 3 で自分が起動）
+ * - 既存あり・per-run ログに URL 有  → { action: 'given', url, pid }（keep-HALT からの再開）
+ * - 既存あり・ログ無し・TTY          → その場で URL を対話入力
+ * - 既存あり・ログ無し・非 TTY        → halt
  */
 async function resolveCloudflared() {
   const existing = findPort8787Cloudflared();
@@ -559,7 +663,16 @@ async function resolveCloudflared() {
   }
   const list = existing.map((x) => `PID ${x.pid} (${x.cmd})`).join(', ');
   warn(`  既存の :8787 cloudflared を検出: ${list}`);
-  warn('  （tunnel.log は grep しません。URL を貼るか、落として再実行してください）');
+
+  // keep-HALT（伝播待ちで止めた前 run）が残した使い捨てログから URL を復帰する。
+  // 共有 tunnel.log は見ない（過去 URL 混入の元）。自分が書いた単一 URL のログだけ。
+  const fromLog = urlFromCloudflaredLogs();
+  if (fromLog) {
+    log(`  前 run の cloudflared ログから URL を復帰: ${fromLog}`);
+    return { action: 'given', url: fromLog, pid: existing[0].pid };
+  }
+
+  warn('  （共有 tunnel.log は見ません。URL を貼るか、落として再実行してください）');
   if (!process.stdin.isTTY) {
     halt('既存トンネルの URL を貼るか、落として再実行してください（非 TTY のため対話入力できません）');
   }
@@ -600,24 +713,81 @@ function runBuild() {
 // ============================================================================
 // Phase 3: 設定と起動
 // ============================================================================
-function startProxy(token) {
-  const child = spawnTracked('proxy', process.execPath, [PROXY_SCRIPT], {
-    env: childEnv({ SUSUMAI_TOKEN: token }),
+/**
+ * 子の stdout/stderr を「この run 専用の新規ファイル」に落として spawn する。
+ * pipe にすると親 exit で読み手が消え、子が fd1/2 への write で SIGPIPE 死する（Go の既定挙動）。
+ * それだと伝播待ち HALT で proxy / cloudflared を「残して次回再利用」できない。ファイルなら
+ * 親が消えても書き続けられる。共有 tunnel.log は使わない（過去 URL 混入の元）。使い捨て
+ * ファイル（.xdg/ 配下・撤収で掃除）なので過去の実行の出力は混ざらない。
+ */
+function spawnToLogFile(name, cmd, args, extraEnv = {}) {
+  fs.mkdirSync(XDG_DIR, { recursive: true });
+  const logPath = path.join(XDG_DIR, `${name}.${process.pid}.${Date.now()}.log`);
+  const fd = fs.openSync(logPath, 'w'); // 新規作成＝空
+  const child = spawnTracked(name, cmd, args, {
+    env: childEnv(extraEnv),
+    stdio: ['ignore', fd, fd],
   });
-  forEachLine(child.stdout, (l) => log(`  [proxy] ${l}`));
-  forEachLine(child.stderr, (l) => warn(`  [proxy] ${l}`));
+  fs.closeSync(fd);
+  child._logPath = logPath;
   return child;
 }
 
+/**
+ * child._logPath を timeoutMs までポーリング tail し、新着行を `[name]` 付きで表示しつつ
+ * match(text) が truthy を返したらそれを返す。
+ * 判定順は「URL 抽出（match）→ 生存確認」。子が URL 出力直後に exit してもログの URL を拾える。
+ */
+async function pollLog(child, name, match, timeoutMs, hint) {
+  const deadline = Date.now() + timeoutMs;
+  let shown = 0;
+  for (;;) {
+    let text = '';
+    try {
+      text = fs.readFileSync(child._logPath, 'utf8');
+    } catch {
+      /* まだ無い */
+    }
+    if (text.length > shown) {
+      for (const line of text.slice(shown).split('\n')) {
+        if (line.trim()) log(`  [${name}] ${line.trim()}`);
+      }
+      shown = text.length;
+    }
+    const hit = match(text);
+    if (hit) return hit;
+    // ENOENT（未インストール）/ 即クラッシュ（EADDRINUSE 等）はここで halt。
+    checkChildAlive(child, name, hint);
+    if (Date.now() >= deadline) {
+      halt(
+        `${name} が ${Math.round(timeoutMs / 1000)}s 以内に期待状態になりませんでした（${path.relative(REPO_ROOT, child._logPath)} を確認）`,
+      );
+    }
+    await sleep(500);
+  }
+}
+
+function startProxy(token) {
+  return spawnToLogFile('proxy', process.execPath, [PROXY_SCRIPT], { SUSUMAI_TOKEN: token });
+}
+
 async function waitProxyHealthy(child, token) {
-  for (let i = 1; i <= 20; i++) {
-    // proxy.mjs には server.on('error') が無く EADDRINUSE / SUSUMAI_TOKEN 不正で即クラッシュする。
-    // 10s フル待たず即 halt する。
-    checkChildAlive(child, 'proxy (rehearsal/proxy.mjs)', '別プロセスが :8787 を掴んでいないか確認してください');
+  // 起動ログを待つ。proxy.mjs には server.on('error') が無く EADDRINUSE / SUSUMAI_TOKEN 不正で
+  // 即クラッシュするが、pollLog / checkChildAlive がログと exit を拾う（10s フル待たない）。
+  await pollLog(
+    child,
+    'proxy',
+    (t) => /listening on :8787\b/.test(t),
+    10_000,
+    '別プロセスが :8787 を掴んでいないか確認してください',
+  );
+  // 透過先（Ollama）まで通っているかを HTTP で最終確認。
+  for (let i = 1; i <= 10; i++) {
+    checkChildAlive(child, 'proxy', '別プロセスが :8787 を掴んでいないか確認してください');
     try {
       const r = await httpReq('GET', `${PROXY_URL}/api/tags`, bearer(token), 3000);
       if (r.status === 200) {
-        log(`  proxy 応答 OK (${i})`);
+        log('  proxy 応答 OK');
         return;
       }
     } catch {
@@ -625,45 +795,21 @@ async function waitProxyHealthy(child, token) {
     }
     await sleep(500);
   }
-  halt('起動した proxy が :8787 で応答しません');
+  halt('proxy は listening ですが :8787 が 200 を返しません（トークン / 上流 Ollama を確認）');
+}
+
+function startCloudflared() {
+  return spawnToLogFile('cloudflared', 'cloudflared', ['tunnel', '--url', TUNNEL_TARGET]);
 }
 
 function captureTunnelUrl(child, timeoutMs = 30_000) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const done = (fn, arg) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      fn(arg);
-    };
-    const onLine = (line) => {
-      log(`  [cloudflared] ${line}`);
-      if (settled) return;
-      const u = extractTunnelUrl(line);
-      if (u) done(resolve, u);
-    };
-    forEachLine(child.stdout, onLine);
-    forEachLine(child.stderr, onLine);
-    const timer = setTimeout(
-      () => done(reject, new Halt('cloudflared の trycloudflare URL を 30 秒以内に採取できませんでした', 2)),
-      timeoutMs,
-    );
-    const noCmd = (e) =>
-      done(
-        reject,
-        new Halt(
-          `cloudflared を起動できません（${e.code || e.message}）。cloudflared がインストールされているか確認してください`,
-          2,
-        ),
-      );
-    // ENOENT（cloudflared 未インストール）は 'exit' ではなく 'error' で来る。
-    if (child._spawnError) noCmd(child._spawnError);
-    child.once('error', noCmd);
-    child.once('exit', (code) =>
-      done(reject, new Halt(`cloudflared が URL 採取前に終了しました (exit ${code})`, 2)),
-    );
-  });
+  return pollLog(
+    child,
+    'cloudflared',
+    (t) => extractTunnelUrl(t),
+    timeoutMs,
+    'cloudflared がインストールされているか確認してください',
+  );
 }
 
 function promptLine(question) {
@@ -678,7 +824,8 @@ function promptLine(question) {
 
 /**
  * トンネル越し GET /api/tags が 200＋期待形状になるまで待つ。
- * cloudflared quick tunnel はエッジ伝播に数分かかる（SPIKE_RESULTS.md: 稼働〜初成功まで ~2分）。
+ * cloudflared quick tunnel はエッジに伝播するまで初回リクエストが通らない。
+ * 2026-09-04 の実機テストで、30s 窓では初回 200 に届かず Phase 3b が2連続 HALT した。
  * 上限は既定 180s（env REHEARSE_TUNNEL_WAIT_MS で上書き可）。間隔は tunnelPollDelayMs のバックオフ。
  * sleep は最大 5s なので SIGINT はその範囲で効く（3分ブロックにはならない）。
  */
@@ -1009,6 +1156,8 @@ async function main() {
   });
   process.on('exit', () => {
     // 最後の砦（同期・ベストエフォート）。追跡 PID にだけ SIGTERM。
+    // 伝播待ち HALT のときは残す（次回再利用のため）。
+    if (state.keepStartedProcesses) return;
     for (const { child } of children) {
       if (child.exitCode == null && child.signalCode == null) {
         try {
@@ -1057,13 +1206,7 @@ async function main() {
     let tunnelUrl;
     if (cfPlan.action === 'start') {
       state.startedCloudflared = true;
-      const child = spawnTracked(
-        'cloudflared',
-        'cloudflared',
-        ['tunnel', '--url', TUNNEL_TARGET],
-        { env: childEnv() },
-      );
-      tunnelUrl = await captureTunnelUrl(child);
+      tunnelUrl = await captureTunnelUrl(startCloudflared());
       log(`  cloudflared 起動、URL 採取: ${tunnelUrl}`);
     } else {
       // resolveCloudflared() が Phase 1 で対話入力済み。
@@ -1075,7 +1218,7 @@ async function main() {
     const setUrl = runSusumai(['config', 'set', '--url', tunnelUrl]);
     if (setUrl.status !== 0) halt(`config set --url に失敗しました\n${setUrl.stderr}`);
 
-    log('\n=== Phase 3b: トンネル検証（2秒 × 15回）===');
+    log('\n=== Phase 3b: トンネル検証（エッジ伝播待ち・上限 180s）===');
     await verifyTunnel(tunnelUrl, token);
 
     log('\n=== Phase 4: 自動検証（ワンショット / パイプ / 死んだトンネル）===');

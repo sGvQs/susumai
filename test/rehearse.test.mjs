@@ -11,6 +11,10 @@ import {
   decideProxyReuse,
   isPort8787TunnelCmd,
   tagsHasModel,
+  tunnelPollDelayMs,
+  isTunnelFatalStatus,
+  describeTunnelProbe,
+  isPerRunCloudflaredLog,
 } from '../rehearsal/rehearse.mjs';
 
 // --- trycloudflare URL 抽出 -------------------------------------------------
@@ -71,6 +75,54 @@ test('judgeDeadTunnel: 閾値以上かかったら不合格', () => {
 test('judgeDeadTunnel: タイムアウト（elapsedMs 非有限）は不合格', () => {
   const r = judgeDeadTunnel({ exitCode: null, elapsedMs: NaN, thresholdMs: 240_000 });
   assert.equal(r.pass, false);
+});
+
+// --- トンネル検証のバックオフ・応答分類 --------------------------------
+
+test('tunnelPollDelayMs: 最初の30秒は2s、その後5s', () => {
+  assert.equal(tunnelPollDelayMs(0), 2000);
+  assert.equal(tunnelPollDelayMs(29_999), 2000);
+  assert.equal(tunnelPollDelayMs(30_000), 5000);
+  assert.equal(tunnelPollDelayMs(120_000), 5000);
+});
+
+test('isTunnelFatalStatus: 401 のみ即打ち切り', () => {
+  assert.equal(isTunnelFatalStatus(401), true);
+  assert.equal(isTunnelFatalStatus(200), false);
+  assert.equal(isTunnelFatalStatus(403), false);
+  assert.equal(isTunnelFatalStatus(502), false);
+  assert.equal(isTunnelFatalStatus(null), false);
+});
+
+test('describeTunnelProbe: fetch cause code → 文言', () => {
+  assert.match(describeTunnelProbe({ errCode: 'ENOTFOUND' }), /ENOTFOUND.*DNS/);
+  assert.match(describeTunnelProbe({ errCode: 'UND_ERR_HEADERS_TIMEOUT' }), /ヘッダ応答なし/);
+  assert.match(describeTunnelProbe({ errCode: 'SOMETHING_NEW' }), /SOMETHING_NEW.*接続失敗/);
+});
+
+test('describeTunnelProbe: HTTP ステータス → 文言（+ 本文先頭）', () => {
+  assert.match(describeTunnelProbe({ status: 502 }), /502.*上流待ち/);
+  assert.match(describeTunnelProbe({ status: 401 }), /401.*トークン不一致/);
+  const d200 = describeTunnelProbe({ status: 200, bodyPrefix: '<!DOCTYPE html>' });
+  assert.match(d200, /200.*想定と異なる/);
+  assert.match(d200, /<!DOCTYPE html>/);
+  assert.equal(describeTunnelProbe({ status: 418 }), 'HTTP 418');
+});
+
+test('describeTunnelProbe: 情報なしは 不明', () => {
+  assert.equal(describeTunnelProbe(), '不明');
+  assert.equal(describeTunnelProbe({}), '不明');
+});
+
+test('isPerRunCloudflaredLog: cloudflared.<pid>.<ts>.log だけ true', () => {
+  assert.equal(isPerRunCloudflaredLog('cloudflared.12345.1700000000000.log'), true);
+  assert.equal(isPerRunCloudflaredLog('cloudflared.1.2.log'), true);
+  // 共有ログ・別プロセスのログ・config は対象外
+  assert.equal(isPerRunCloudflaredLog('cloudflared.log'), false);
+  assert.equal(isPerRunCloudflaredLog('tunnel.log'), false);
+  assert.equal(isPerRunCloudflaredLog('proxy.12345.1700000000000.log'), false);
+  assert.equal(isPerRunCloudflaredLog('cloudflared.12345.1700000000000.log.bak'), false);
+  assert.equal(isPerRunCloudflaredLog('config.json'), false);
 });
 
 // --- proxy 3段チェーン（ステータス → 判定 の写像）------------------------
