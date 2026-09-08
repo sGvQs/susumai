@@ -5,8 +5,10 @@
  * このファイルは仕様・値・背景を持たない（正典の分担）:
  *   - allowlist の内容            → rehearsal/proxy.mjs（3段チェーンで /api/pull→403 を1つ使うだけ）
  *   - タイムアウト値(10/60/300)   → src/client.ts ＋ rehearsal/SPIKE_RESULTS.md §8（ここに固定しない）
- *   - トークン運搬(手動/別PC)      → RUNBOOK §2
- *   - teardown 手順               → RUNBOOK §9（同じ pkill を使う）
+ *   - トークン運搬(手動/別PC)      → RUNBOOK §5（別マシンから使う）
+ *   - teardown 手順               → RUNBOOK §3（撤収。同じ pkill を使う）
+ *   - 手動フォールバック           → RUNBOOK §6
+ *   - 詰まったら(ログの読み方)     → RUNBOOK §7
  *   - URL の揮発性                → SPIKE_RESULTS.md（毎回採取し直す）
  *
  * 使い方:
@@ -1007,7 +1009,7 @@ async function manualPhase({ tunnelUrl, token }) {
   log(`  XDG_CONFIG_HOME=${XDG_DIR} \\`);
   log(`  ${process.execPath} ${DIST_INDEX}`);
   log('');
-  log('別 PC 用（1行・トークンはフル値。RUNBOOK §2/§8 の運搬手順に従うこと）:');
+  log('別 PC 用（1行・トークンはフル値。RUNBOOK §5「別マシンから使う」の運搬手順に従うこと）:');
   log(`  URL=${tunnelUrl} TOKEN=${token}`);
   log('');
 
@@ -1045,7 +1047,7 @@ async function manualPhase({ tunnelUrl, token }) {
 }
 
 // ============================================================================
-// teardown サブコマンド（明示撤収。RUNBOOK §9 と同じ pkill を既定にする）
+// teardown サブコマンド（明示撤収。RUNBOOK §3「撤収」と同じ pkill を既定にする）
 // ============================================================================
 async function teardownCommand(flags) {
   log('明示撤収 (teardown' + (flags.all ? ' --all' : '') + ')');
