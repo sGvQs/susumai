@@ -1,6 +1,6 @@
 {
   "name": "susumai",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Zero-dependency CLI to chat with a self-hosted Ollama (DeepSeek R1) over a Cloudflare tunnel.",
   "license": "MIT",
   "author": "susum",

@@ -1,5 +1,7 @@
 # 段階0：リハーサル環境構築＋ストリーミング疎通スパイク — 結果
 
+> これは認証導入前の quick tunnel ＋ 共有 Bearer トークン経路の記録です。定常運用（GitHub アカウントでのログイン・固定 URL `llm.susumai.net`・cloudflared / proxy の launchd 常駐）は `[[50_Meta/Gamebook_susumai_auth]]` を正とします。本文は当時の観測のまま、変更していません。
+
 実施日: 2026-09-03 / macOS arm64 (Apple M2, RAM 24GB), Node v24.13.0
 
 ## 環境

@@ -556,7 +556,9 @@ var History = class {
 // src/auth.ts
 var DEFAULT_CLIENT_ID = "Ov23liuaEuBGcxLCPA3T";
 function clientId() {
-  return process.env.SUSUMAI_OAUTH_CLIENT_ID || DEFAULT_CLIENT_ID;
+  if (process.env.SUSUMAI_OAUTH_CLIENT_ID) return process.env.SUSUMAI_OAUTH_CLIENT_ID;
+  if ("Ov23liuaEuBGcxLCPA3T") return "Ov23liuaEuBGcxLCPA3T";
+  return DEFAULT_CLIENT_ID;
 }
 var DEVICE_CODE_URL = "https://github.com/login/device/code";
 var ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
@@ -764,7 +766,7 @@ function assertNodeVersion() {
   }
 }
 assertNodeVersion();
-var VERSION = true ? "0.1.0" : "0.0.0-dev";
+var VERSION = true ? "0.2.0" : "0.0.0-dev";
 var DIM = "\x1B[2m";
 var RESET = "\x1B[0m";
 var isTty = Boolean(stdout.isTTY);

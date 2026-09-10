@@ -1,5 +1,7 @@
 # RUNBOOK — susumai 当日検証
 
+> これは認証導入前の quick tunnel ＋ 共有 Bearer トークン経路の記録です。定常運用（GitHub アカウントでのログイン・固定 URL `llm.susumai.net`・cloudflared / proxy の launchd 常駐）は `[[50_Meta/Gamebook_susumai_auth]]` を正とします。以下は rehearse（検証）フロー向けで、§5 の1点訂正と §8 の追加（段階3）を除き本文はそのままです。
+
 本線は **`npm run rehearse`**（`rehearsal/rehearse.mjs`）。今日 end-to-end で通った。
 この文書はその周辺だけを持つ: 全体像の理解／rehearse が止まって聞いてきたときの対処（§2）／rehearse.mjs 自体が壊れたときの手動フォールバック（§6）。
 
@@ -47,7 +49,7 @@ REPL は別端末で叩く。rehearse が Phase 5 で起動コマンド（`XDG_C
 
 ## 5. 別マシンから使う
 
-- susumai は npm 公開済み: `npm i -g susumai`。動くのは **npm registry の tarball だけが `dist` を含む**から（`files: ["dist"]` ＋ 公開時ビルド済み）。git 直インストール（`npm i -g github:…`）は `prepare` が無いので `dist` が入らず `bin` を解決できない。registry パッケージなら Volta 環境でも通る
+- susumai は npm 公開済み: `npm i -g susumai`（主経路）。`dist/index.js` はリポジトリにコミット済みで `files: ["dist"]` に入るので、**registry・git 直インストール（`npm i -g github:sGvQs/susumai`）のどちらでも `bin` が解決される**。`prepare` などのインストール時ビルドは無い（devDependencies 不要）。Volta 環境でも通る
 - `susumai config set --url <トンネルURL> --token <トークン>` → `susumai`
 - トークンは `npm run rehearse` の Phase 5 が表示するフル値。`susumai config get` の先頭 4／末尾 4（`config.ts` の `maskToken`）で照合する
 - 会社 Windows 等ガチガチの環境の懸念（Node が入れられない・ファイアウォールが `trycloudflare` を遮断・EDR/DLP）は環境依存。持ち込んで試すしかない
@@ -67,3 +69,19 @@ rehearse が壊れているなら、直すのは rehearse であって proxy.mjs
 - `rehearsal/proxy.log`: `401` が並ぶ＝トークン不一致 / `403`＝allowlist 外 / chat が来ない＝トンネルか URL 設定
 - `502`（Cloudflare の HTML が返る）＝ proxy が落ちている
 - `rehearsal/SPIKE_RESULTS.md`: go/no-go、`think:false` でも thinking が出る件、タイムアウトの背景（§8）
+
+## 8. 本番 proxy が常駐しているとき（rehearse の前に停止する）
+
+段階3 で本番 proxy を launchd 常駐させたマシン（当面 MacBook Pro、将来 Mac mini）で
+`npm run rehearse` を回すときは、先に本番 proxy を降ろす。放置しても rehearse は本番を
+再利用・kill せず `:8787` 占有として正しく HALT する（本番を巻き込まない設計）が、
+rehearse を通したいなら本番を止める:
+
+```sh
+launchctl bootout gui/$(id -u)/com.susumai.proxy                                   # 停止
+npm run rehearse                                                                    # 検証
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.susumai.proxy.plist     # 復帰
+```
+
+`pkill` は使わない。`KeepAlive=true` なので launchd が即 respawn し、収束にならない。
+本番 proxy のインスタンス化・パスは `ops/README.md` を正とする。

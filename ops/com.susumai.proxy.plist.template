@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  susumai 本番 proxy の launchd LaunchAgent テンプレート（段階3）。
+  placeholder のみ。実 home パス入りの .plist はコミットしない（ops/README.md 参照）。
+  __PLACEHOLDER__ を sed で埋めて ~/Library/LaunchAgents/com.susumai.proxy.plist に置く。
+  SUSUMAI_TOKEN は絶対に書かない（本番は github モードのみ）。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.susumai.proxy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BIN__</string>
+    <string>__REPO_DIR__/ops/proxy-prod.mjs</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_DIR__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SUSUMAI_PROXY_LOG</key>
+    <string>__PROD_LOG__</string>
+    <key>SUSUMAI_ALLOWLIST</key>
+    <string>__ALLOWLIST_JSON__</string>
+  </dict>
+
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__STDOUT_LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__STDERR_LOG__</string>
+</dict>
+</plist>

@@ -27,7 +27,8 @@
  * 起動時 env 検証 (buildConfig / fail-closed):
  *   次の経路で buildConfig() は ConfigError を throw する（テスト可能にするため。
  *   process.exit(1) は呼ばない）: 両モード未設定 / SUSUMAI_ALLOWLIST が読めない /
- *   JSON 不正 / id 非整数 / 数値 env が非正数。
+ *   JSON 不正 / id 非整数 / 数値 env が非正数 / SUSUMAI_PROD=1 かつ SUSUMAI_TOKEN 設定 /
+ *   SUSUMAI_PROD=1 かつ SUSUMAI_PROXY_LOG が未設定 または 親ディレクトリが無い・書けない。
  *   env 検証は startServer()（が呼ぶ buildConfig）に置く。startServer() が ConfigError を
  *   catch → stderr ＋ exit(1) に変換する。import.meta.main /（段階3で作る）
  *   ops/proxy-prod.mjs の両エントリポイントが明示的に startServer() を呼ぶ。
@@ -52,9 +53,21 @@
  *     「200 だが id が正整数でない不正応答」はキャッシュせず、短い backoff の後
  *     503 deny:ghdown（サーバ側起因なので 403 deny:user にはしない）。
  *
+ * 本番モード (SUSUMAI_PROD=1 / 段階3 の ops/proxy-prod.mjs シムが立てる):
+ *   - SUSUMAI_TOKEN が設定されていたら起動拒否 (ConfigError)。本番は github モードのみ。
+ *   - SUSUMAI_PROXY_LOG（本番アクセスログのパス）が必須。未設定なら ConfigError。
+ *     さらに親ディレクトリが存在しない・書き込めない場合も ConfigError（本番はログ分離が
+ *     主目的なので、書けないまま黙って起動しない。plist 側で必ず有効なパスを渡す前提）。
+ *   ログ／argv からの identity 分離は ops/proxy-prod.mjs 冒頭コメントを正とする。
+ *
+ * SUSUMAI_PROXY_LOG（本番モードでなくても有効）:
+ *   設定するとアクセスログをそのパスへ。未設定なら従来どおり rehearsal/proxy.log。
+ *
  * env（既定値 / env 名 / TTL の桁）:
  *   SUSUMAI_TOKEN                共有 Bearer（設定で bearer モード有効）
  *   SUSUMAI_ALLOWLIST           GitHub 許可リスト JSON のパス（設定で github モード有効）
+ *   SUSUMAI_PROD=1              本番モード（github のみ許可 / SUSUMAI_PROXY_LOG 必須）
+ *   SUSUMAI_PROXY_LOG          アクセスログの出力先パス（本番モードでは必須）
  *   SUSUMAI_RL_CAPACITY          = 20     per-IP token bucket 容量（バースト許容数）
  *   SUSUMAI_RL_REFILL_PER_MIN    = 10     per-IP 毎分補充トークン数
  *   SUSUMAI_GH_HOURLY_CAP       = 500    api.github.com/user へのローリング1時間上限
@@ -85,6 +98,7 @@ import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 
 const LISTEN_PORT = 8787;
 const UPSTREAM_HOST = '127.0.0.1';
@@ -201,8 +215,9 @@ export function isAllowed(method, path) {
 /**
  * 起動時の設定エラー（fail-closed）。buildConfig() が throw し、エントリポイント側
  * （startServer / import.meta.main フォールバック）が catch → stderr ＋ exit(1) に変換する。
- * これにより 4 つの fail-closed 経路（両モード未設定 / allowlist 不正JSON / id 非整数 /
- * ファイル読めない / env が非正数）をユニットテストで検証できる。
+ * これにより 7 つの fail-closed 経路（両モード未設定 / allowlist 不正JSON / id 非整数 /
+ * ファイル読めない / env が非正数 / SUSUMAI_PROD=1 かつ SUSUMAI_TOKEN 設定 /
+ * SUSUMAI_PROD=1 かつ SUSUMAI_PROXY_LOG の書き込み先が不備）をユニットテストで検証できる。
  */
 export class ConfigError extends Error {
   constructor(message) {
@@ -229,8 +244,35 @@ function envPosNum(env, name, def) {
 export function buildConfig(env = process.env) {
   const token = env.SUSUMAI_TOKEN;
   const allowlistPath = env.SUSUMAI_ALLOWLIST;
+  const prod = env.SUSUMAI_PROD === '1';
+  const proxyLog = env.SUSUMAI_PROXY_LOG;
   const bearerMode = !!token;
   const githubMode = !!allowlistPath;
+
+  // 本番モード（段階3）: bearer 禁止・ログパス必須（fail-closed）。
+  if (prod && bearerMode) {
+    throw new ConfigError(
+      'SUSUMAI_PROD=1 のとき SUSUMAI_TOKEN は設定できません。本番は github モードのみです (fail-closed)。',
+    );
+  }
+  if (prod && !proxyLog) {
+    throw new ConfigError(
+      'SUSUMAI_PROD=1 のとき SUSUMAI_PROXY_LOG（本番アクセスログのパス）が必須です。\n' +
+        '  本番ログを rehearsal/proxy.log に混ぜないための保証です。launchd の EnvironmentVariables で渡してください。',
+    );
+  }
+  if (prod) {
+    // 本番はログ分離が主目的。書き込み先が不備なら黙って起動しない（fail-closed）。
+    const dir = path.dirname(path.resolve(proxyLog));
+    try {
+      fs.accessSync(dir, fs.constants.W_OK);
+    } catch {
+      throw new ConfigError(
+        `SUSUMAI_PROD=1: SUSUMAI_PROXY_LOG (${proxyLog}) の親ディレクトリに書き込めません: ${dir}\n` +
+          '  ディレクトリを作成し書き込み権限を与えてください（本番はログ分離が主目的です）。',
+      );
+    }
+  }
 
   if (!bearerMode && !githubMode) {
     throw new ConfigError(
@@ -274,6 +316,8 @@ export function buildConfig(env = process.env) {
     githubMode,
     allowlist,
     limits,
+    // アクセスログの出力先。未設定なら startServer が既定の rehearsal/proxy.log を使う。
+    logPath: proxyLog ? path.resolve(proxyLog) : null,
   };
 }
 
@@ -555,8 +599,10 @@ export function startServer(opts = {}) {
 
   const state = makeState();
 
-  // 最小アクセスログ（proxy.log へ追記）。既存フォーマットにフィールドを足すだけ。
-  const accessLog = fs.createWriteStream(new URL('./proxy.log', import.meta.url), { flags: 'a' });
+  // 最小アクセスログ（既存フォーマットにフィールドを足すだけ）。
+  // SUSUMAI_PROXY_LOG があればそのパスへ（本番）。無ければ従来どおり rehearsal/proxy.log。
+  const logTarget = config.logPath || new URL('./proxy.log', import.meta.url);
+  const accessLog = fs.createWriteStream(logTarget, { flags: 'a' });
   accessLog.on('error', () => {}); // ログ書き込み失敗でプロセスを落とさない
   const logAccess = (rec) => {
     const d = rec.deny ? ` deny=${rec.deny}` : '';

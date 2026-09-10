@@ -8,3 +8,8 @@ rehearsal/allowlist*.json
 !rehearsal/allowlist.example.json
 # proxy の状態ファイル（現状は in-memory のみだが将来の書き出しに備える）
 rehearsal/*.state.json
+
+# 段階3 本番常駐: 実インスタンス化した plist（テンプレートだけ追跡する）と本番ログ
+ops/*.plist
+!ops/*.plist.template
+ops/*.log

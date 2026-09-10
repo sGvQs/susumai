@@ -2,7 +2,8 @@
  * src/auth.ts — GitHub OAuth Device Authorization Grant を CLI が自前で実行する。
  * ----------------------------------------------------------------------------
  * ゼロ依存（node 組み込みの global fetch のみ）。ブラウザ自動起動（open / xdg-open）は
- * 入れない（zero-dep 方針）。この段階では client_id をビルドに焼き込まない。
+ * 入れない（zero-dep 方針）。client_id は publish 時に tsup の define で `__CLIENT_ID__` に
+ * 焼き込む（実行時 env なしで `susumai login` が動く）。実行時 env override は clientId() が優先。
  *
  * 純関数（parseDeviceCodeResponse / classifyPollResponse / nextInterval）は
  * test/auth.test.mjs から named import される。deviceLogin だけが副作用を持つ。
@@ -11,9 +12,17 @@
 /** この repo の OAuth App の client_id。秘密ではない（公開情報）。 */
 const DEFAULT_CLIENT_ID = 'Ov23liuaEuBGcxLCPA3T';
 
-/** env override（`SUSUMAI_OAUTH_CLIENT_ID`）＋ dev フォールバック。 */
+/**
+ * client_id の解決（優先順）:
+ *   1. 実行時 env `SUSUMAI_OAUTH_CLIENT_ID`（別 OAuth App を使うマシン向け override）
+ *   2. `__CLIENT_ID__`（publish 時に tsup の define で焼き込まれるビルド時定数）
+ *   3. ハードコード定数（テストで src を直接 import した経路では define が無いのでここに落ちる）
+ * 焼き込みが常に入るので、ビルド済み配布物では実質「env || 焼き込み」。
+ */
 export function clientId(): string {
-  return process.env.SUSUMAI_OAUTH_CLIENT_ID || DEFAULT_CLIENT_ID;
+  if (process.env.SUSUMAI_OAUTH_CLIENT_ID) return process.env.SUSUMAI_OAUTH_CLIENT_ID;
+  if (typeof __CLIENT_ID__ !== 'undefined' && __CLIENT_ID__) return __CLIENT_ID__;
+  return DEFAULT_CLIENT_ID;
 }
 
 const DEVICE_CODE_URL = 'https://github.com/login/device/code';
