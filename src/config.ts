@@ -1,6 +1,5 @@
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { configHome, readJsonFile, writeFileAtomic0600 } from './xdg.ts';
 
 export interface Config {
   /** トンネルの base URL（未設定可）。 */
@@ -23,9 +22,9 @@ export const DEFAULT_CONFIG: Config = {
  * win32 分岐は入れない（決定済み）。XDG_CONFIG_HOME を優先。
  */
 export function configPath(): string {
-  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
-  // XDG_CONFIG_HOME が相対パスのこともある。HELP は「絶対パス」と明記しているので resolve する。
-  return path.resolve(path.join(base, 'susumai', 'config.json'));
+  // XDG_CONFIG_HOME が相対パスのこともある。HELP は「絶対パス」と明記しているので
+  // configHome() が resolve 済みの絶対パスを返す。
+  return path.resolve(path.join(configHome(), 'susumai', 'config.json'));
 }
 
 /** 壊れた設定ファイルを検知したときの共通経路: stderr に警告して既定値を返す。 */
@@ -44,20 +43,17 @@ function warnBrokenConfig(reason: string): Config {
  *   オブジェクトでない（null・配列・数値・文字列・真偽値）もの。
  */
 export function loadConfig(): Config {
-  let raw: string;
-  try {
-    raw = fs.readFileSync(configPath(), 'utf8');
-  } catch {
+  const read = readJsonFile(configPath());
+  if (read.status === 'missing') {
     return { ...DEFAULT_CONFIG };
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
+  if (read.status === 'invalid-json') {
     return warnBrokenConfig('不正な JSON');
   }
+  const parsed = read.value;
   // `null`（typeof は 'object'）・配列・非オブジェクトを弾く。ここを通さないと
   // 下の `parsed.url` 参照が `null` で TypeError になり、生の英語エラーで落ちる。
+  // 「JSON だが非オブジェクト」の判定は xdg.readJsonFile ではなくここに残す（既存テストが pin）。
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return warnBrokenConfig('JSON オブジェクトではありません');
   }
@@ -87,8 +83,6 @@ export function loadConfig(): Config {
 
 /** 設定を保存する。ディレクトリを掘ってから 0600 で書く（既存ファイルも 0600 に矯正）。 */
 export function saveConfig(cfg: Config): void {
-  const file = configPath();
-  fs.mkdirSync(path.dirname(file), { recursive: true });
   const body: Record<string, unknown> = {
     model: cfg.model,
     numCtx: cfg.numCtx,
@@ -96,17 +90,8 @@ export function saveConfig(cfg: Config): void {
   };
   if (cfg.url) body.url = cfg.url;
   if (cfg.token) body.token = cfg.token;
-  // 非アトミック書き込みだと、書き込み中の中断で config が破損する。
-  // 同一ディレクトリの temp に書いてから rename（同一 FS 上ではアトミック）。
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(body, null, 2) + '\n', { mode: 0o600 });
-  try {
-    fs.renameSync(tmp, file);
-  } catch (err) {
-    fs.rmSync(tmp, { force: true });
-    throw err;
-  }
-  fs.chmodSync(file, 0o600);
+  // ディレクトリ作成・tmp+rename・0600 矯正は writeFileAtomic0600 が担う（旧挙動そのまま）。
+  writeFileAtomic0600(configPath(), JSON.stringify(body, null, 2) + '\n');
 }
 
 function maskToken(token: string): string {

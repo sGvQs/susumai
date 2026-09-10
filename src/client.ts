@@ -79,7 +79,9 @@ export async function checkHealth(cfg: Config, opts: { timeoutMs?: number } = {}
   }
   if (resp.status === 401) {
     void resp.body?.cancel().catch(() => {}); // 未消費レスポンスボディを解放
-    throw new Error('認証に失敗しました (401)。`susumai config set --token <token>` を確認してください');
+    throw new Error(
+      '認証に失敗しました (401)。`susumai login` でログインするか、classic PAT を `susumai config set --token ghp_...` で設定してください',
+    );
   }
   if (!resp.ok) {
     void resp.body?.cancel().catch(() => {}); // 未消費レスポンスボディを解放
@@ -213,7 +215,10 @@ async function* rawChatStream(
   if (!resp.ok) {
     void resp.body?.cancel().catch(() => {}); // 未消費レスポンスボディを解放
     cleanup();
-    if (resp.status === 401) throw new Error('認証に失敗しました (401)。token を確認してください');
+    if (resp.status === 401)
+      throw new Error(
+        '認証に失敗しました (401)。`susumai login` でログインするか、classic PAT を `susumai config set --token ghp_...` で設定してください',
+      );
     if (resp.status === 404 || resp.status === 503) {
       throw new Error(`モデルが未ロードです (HTTP ${resp.status})。サーバ側でモデルを温めてください`);
     }

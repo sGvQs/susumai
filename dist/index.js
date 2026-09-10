@@ -7,17 +7,50 @@ import process2 from "process";
 import { Buffer } from "buffer";
 
 // src/config.ts
+import path2 from "path";
+
+// src/xdg.ts
 import fs from "fs";
 import os from "os";
 import path from "path";
+function configHome() {
+  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+  return path.resolve(base);
+}
+function writeFileAtomic0600(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, text, { mode: 384 });
+  try {
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+  fs.chmodSync(file, 384);
+}
+function readJsonFile(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch {
+    return { status: "missing" };
+  }
+  try {
+    return { status: "ok", value: JSON.parse(raw) };
+  } catch {
+    return { status: "invalid-json" };
+  }
+}
+
+// src/config.ts
 var DEFAULT_CONFIG = {
   model: "deepseek-r1:8b",
   numCtx: 16384,
   stream: true
 };
 function configPath() {
-  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
-  return path.resolve(path.join(base, "susumai", "config.json"));
+  return path2.resolve(path2.join(configHome(), "susumai", "config.json"));
 }
 function warnBrokenConfig(reason) {
   process.stderr.write(
@@ -27,18 +60,14 @@ function warnBrokenConfig(reason) {
   return { ...DEFAULT_CONFIG };
 }
 function loadConfig() {
-  let raw;
-  try {
-    raw = fs.readFileSync(configPath(), "utf8");
-  } catch {
+  const read = readJsonFile(configPath());
+  if (read.status === "missing") {
     return { ...DEFAULT_CONFIG };
   }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
+  if (read.status === "invalid-json") {
     return warnBrokenConfig("\u4E0D\u6B63\u306A JSON");
   }
+  const parsed = read.value;
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return warnBrokenConfig("JSON \u30AA\u30D6\u30B8\u30A7\u30AF\u30C8\u3067\u306F\u3042\u308A\u307E\u305B\u3093");
   }
@@ -61,8 +90,6 @@ function loadConfig() {
   return cfg;
 }
 function saveConfig(cfg) {
-  const file = configPath();
-  fs.mkdirSync(path.dirname(file), { recursive: true });
   const body = {
     model: cfg.model,
     numCtx: cfg.numCtx,
@@ -70,15 +97,7 @@ function saveConfig(cfg) {
   };
   if (cfg.url) body.url = cfg.url;
   if (cfg.token) body.token = cfg.token;
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(body, null, 2) + "\n", { mode: 384 });
-  try {
-    fs.renameSync(tmp, file);
-  } catch (err) {
-    fs.rmSync(tmp, { force: true });
-    throw err;
-  }
-  fs.chmodSync(file, 384);
+  writeFileAtomic0600(configPath(), JSON.stringify(body, null, 2) + "\n");
 }
 function maskToken(token) {
   if (token.length <= 8) return "*".repeat(token.length);
@@ -319,7 +338,9 @@ async function checkHealth(cfg, opts = {}) {
   if (resp.status === 401) {
     void resp.body?.cancel().catch(() => {
     });
-    throw new Error("\u8A8D\u8A3C\u306B\u5931\u6557\u3057\u307E\u3057\u305F (401)\u3002`susumai config set --token <token>` \u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044");
+    throw new Error(
+      "\u8A8D\u8A3C\u306B\u5931\u6557\u3057\u307E\u3057\u305F (401)\u3002`susumai login` \u3067\u30ED\u30B0\u30A4\u30F3\u3059\u308B\u304B\u3001classic PAT \u3092 `susumai config set --token ghp_...` \u3067\u8A2D\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044"
+    );
   }
   if (!resp.ok) {
     void resp.body?.cancel().catch(() => {
@@ -426,7 +447,10 @@ async function* rawChatStream(cfg, messages, opts = {}) {
     void resp.body?.cancel().catch(() => {
     });
     cleanup();
-    if (resp.status === 401) throw new Error("\u8A8D\u8A3C\u306B\u5931\u6557\u3057\u307E\u3057\u305F (401)\u3002token \u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044");
+    if (resp.status === 401)
+      throw new Error(
+        "\u8A8D\u8A3C\u306B\u5931\u6557\u3057\u307E\u3057\u305F (401)\u3002`susumai login` \u3067\u30ED\u30B0\u30A4\u30F3\u3059\u308B\u304B\u3001classic PAT \u3092 `susumai config set --token ghp_...` \u3067\u8A2D\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044"
+      );
     if (resp.status === 404 || resp.status === 503) {
       throw new Error(`\u30E2\u30C7\u30EB\u304C\u672A\u30ED\u30FC\u30C9\u3067\u3059 (HTTP ${resp.status})\u3002\u30B5\u30FC\u30D0\u5074\u3067\u30E2\u30C7\u30EB\u3092\u6E29\u3081\u3066\u304F\u3060\u3055\u3044`);
     }
@@ -529,6 +553,204 @@ var History = class {
   }
 };
 
+// src/auth.ts
+var DEFAULT_CLIENT_ID = "Ov23liuaEuBGcxLCPA3T";
+function clientId() {
+  return process.env.SUSUMAI_OAUTH_CLIENT_ID || DEFAULT_CLIENT_ID;
+}
+var DEVICE_CODE_URL = "https://github.com/login/device/code";
+var ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
+var USER_URL = "https://api.github.com/user";
+var UA = "susumai";
+function parseDeviceCodeResponse(json) {
+  if (!json || typeof json !== "object") {
+    throw new Error("GitHub \u306E device code \u5FDC\u7B54\u3092\u89E3\u91C8\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F");
+  }
+  const o = json;
+  if (typeof o.error === "string") {
+    const detail = typeof o.error_description === "string" ? o.error_description : o.error;
+    throw new Error(`GitHub \u306E device code \u53D6\u5F97\u306B\u5931\u6557\u3057\u307E\u3057\u305F: ${detail}`);
+  }
+  const { device_code: dc, user_code: uc, verification_uri: vu } = o;
+  if (typeof dc !== "string" || typeof uc !== "string" || typeof vu !== "string") {
+    throw new Error("GitHub \u306E device code \u5FDC\u7B54\u306B\u5FC5\u9808\u30D5\u30A3\u30FC\u30EB\u30C9\u304C\u3042\u308A\u307E\u305B\u3093");
+  }
+  const interval = typeof o.interval === "number" && o.interval > 0 ? o.interval : 5;
+  const expiresIn = typeof o.expires_in === "number" && o.expires_in > 0 ? o.expires_in : 900;
+  return { deviceCode: dc, userCode: uc, verificationUri: vu, interval, expiresIn };
+}
+function classifyPollResponse(json) {
+  if (!json || typeof json !== "object") {
+    throw new Error("GitHub \u306E token \u30DD\u30FC\u30EA\u30F3\u30B0\u5FDC\u7B54\u3092\u89E3\u91C8\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F");
+  }
+  const o = json;
+  if (typeof o.access_token === "string" && o.access_token) {
+    return { token: o.access_token };
+  }
+  switch (o.error) {
+    case "authorization_pending":
+      return "pending";
+    case "slow_down":
+      return "slow_down";
+    case "expired_token":
+      return "expired";
+    case "access_denied":
+      return "denied";
+    default: {
+      const detail = typeof o.error_description === "string" ? o.error_description : typeof o.error === "string" ? o.error : "unknown";
+      throw new Error(`GitHub \u8A8D\u8A3C\u3067\u4E88\u671F\u3057\u306A\u3044\u5FDC\u7B54: ${detail}`);
+    }
+  }
+}
+function nextInterval(current, slowDown) {
+  return slowDown ? current + 5 : current;
+}
+function isNonInteractive() {
+  if (process.env.CI) return true;
+  return !process.stdin.isTTY;
+}
+var realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+var NON_INTERACTIVE_MESSAGE = "\u975E\u5BFE\u8A71 / CI \u74B0\u5883\u3067\u306F `susumai login`\uFF08GitHub device flow\uFF09\u3092\u5B9F\u884C\u3067\u304D\u307E\u305B\u3093\u3002\n\u30D6\u30E9\u30A6\u30B6\u3067\u30B3\u30FC\u30C9\u3092\u5165\u529B\u3059\u308B\u5FC5\u8981\u304C\u3042\u308B\u305F\u3081\u3067\u3059\u3002\n\u30D5\u30A9\u30FC\u30EB\u30D0\u30C3\u30AF: classic PAT\uFF08`ghp_...`\uFF09\u3092\u4F5C\u6210\u3057 `susumai config set --token ghp_...` \u3067\u8A2D\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\n\uFF08fine-grained \u3067\u306F\u306A\u304F classic \u3092\u63A8\u5968\uFF09\u3002";
+async function deviceLogin(opts = {}) {
+  const emit = opts.log ?? ((m) => process.stderr.write(m + "\n"));
+  const sleep = realSleep;
+  if (isNonInteractive()) {
+    throw new Error(NON_INTERACTIVE_MESSAGE);
+  }
+  const id = clientId();
+  let dcRes;
+  try {
+    dcRes = await fetch(DEVICE_CODE_URL, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": UA
+      },
+      body: new URLSearchParams({ client_id: id }).toString()
+    });
+  } catch (err) {
+    throw new Error(`GitHub (${DEVICE_CODE_URL}) \u306B\u5230\u9054\u3067\u304D\u307E\u305B\u3093: ${describeErr(err)}`);
+  }
+  if (!dcRes.ok) {
+    void dcRes.body?.cancel().catch(() => {
+    });
+    throw new Error(
+      `GitHub \u306E\u30C7\u30D0\u30A4\u30B9\u30B3\u30FC\u30C9\u767A\u884C\u306B\u5931\u6557\u3057\u307E\u3057\u305F\uFF08HTTP ${dcRes.status}\uFF09\u3002SUSUMAI_OAUTH_CLIENT_ID \u304C\u6B63\u3057\u3044\u304B\u3001GitHub \u5074\u306E\u969C\u5BB3\u3067\u306A\u3044\u304B\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
+    );
+  }
+  const dc = parseDeviceCodeResponse(await dcRes.json().catch(() => null));
+  emit(`\u30D6\u30E9\u30A6\u30B6\u3067 ${dc.verificationUri} \u3092\u958B\u3044\u3066\u3001\u30B3\u30FC\u30C9 ${dc.userCode} \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044`);
+  let interval = dc.interval;
+  const deadline = Date.now() + dc.expiresIn * 1e3;
+  for (; ; ) {
+    await sleep(interval * 1e3);
+    if (Date.now() >= deadline) {
+      throw new Error(
+        "GitHub \u8A8D\u8A3C\u304C\u30BF\u30A4\u30E0\u30A2\u30A6\u30C8\u3057\u307E\u3057\u305F\uFF08\u30B3\u30FC\u30C9\u306E\u6709\u52B9\u671F\u9650\u5207\u308C\uFF09\u3002\u3082\u3046\u4E00\u5EA6 `susumai login` \u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
+      );
+    }
+    let pollRes;
+    try {
+      pollRes = await fetch(ACCESS_TOKEN_URL, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": UA
+        },
+        body: new URLSearchParams({
+          client_id: id,
+          device_code: dc.deviceCode,
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code"
+        }).toString()
+      });
+    } catch (err) {
+      throw new Error(`GitHub (${ACCESS_TOKEN_URL}) \u306B\u5230\u9054\u3067\u304D\u307E\u305B\u3093: ${describeErr(err)}`);
+    }
+    const pollText = await pollRes.text().catch(() => "");
+    let pollJson = null;
+    try {
+      pollJson = JSON.parse(pollText);
+    } catch {
+    }
+    if (!pollRes.ok && (pollJson === null || typeof pollJson !== "object")) {
+      throw new Error(
+        `GitHub \u306E\u30C8\u30FC\u30AF\u30F3\u53D6\u5F97\u306B\u5931\u6557\u3057\u307E\u3057\u305F\uFF08HTTP ${pollRes.status}\uFF09\u3002\u6642\u9593\u3092\u304A\u3044\u3066\u518D\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
+      );
+    }
+    const verdict = classifyPollResponse(pollJson);
+    if (typeof verdict === "object") {
+      const user = await fetchGitHubUser(verdict.token);
+      return { token: verdict.token, login: user.login, id: user.id };
+    }
+    if (verdict === "pending") continue;
+    if (verdict === "slow_down") {
+      interval = nextInterval(interval, true);
+      continue;
+    }
+    if (verdict === "expired") {
+      throw new Error(
+        "GitHub \u306E\u30B3\u30FC\u30C9\u304C\u671F\u9650\u5207\u308C\u306B\u306A\u308A\u307E\u3057\u305F\u3002\u3082\u3046\u4E00\u5EA6 `susumai login` \u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
+      );
+    }
+    throw new Error("GitHub \u5074\u3067\u8A8D\u8A3C\u304C\u62D2\u5426\u3055\u308C\u307E\u3057\u305F\uFF08access_denied\uFF09\u3002");
+  }
+}
+async function fetchGitHubUser(token) {
+  let res;
+  try {
+    res = await fetch(USER_URL, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": UA
+      }
+    });
+  } catch (err) {
+    throw new Error(`GitHub (${USER_URL}) \u306B\u5230\u9054\u3067\u304D\u307E\u305B\u3093: ${describeErr(err)}`);
+  }
+  if (!res.ok) {
+    throw new Error(`GitHub \u30E6\u30FC\u30B6\u30FC\u60C5\u5831\u306E\u53D6\u5F97\u306B\u5931\u6557\u3057\u307E\u3057\u305F (HTTP ${res.status})`);
+  }
+  const j = await res.json().catch(() => null);
+  if (!j || typeof j.login !== "string" || typeof j.id !== "number") {
+    throw new Error("GitHub \u30E6\u30FC\u30B6\u30FC\u60C5\u5831\u306E\u5FDC\u7B54\u3092\u89E3\u91C8\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F");
+  }
+  return { login: j.login, id: j.id };
+}
+function describeErr(err) {
+  if (err && typeof err === "object") {
+    const e = err;
+    return String(e.cause?.code ?? e.code ?? e.message ?? err);
+  }
+  return String(err);
+}
+
+// src/credentials.ts
+import fs2 from "fs";
+import path3 from "path";
+function credentialsPath() {
+  return path3.resolve(path3.join(configHome(), "susumai", "credentials.json"));
+}
+function loadCredentials() {
+  const read = readJsonFile(credentialsPath());
+  if (read.status !== "ok") return null;
+  const value = read.value;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  return value;
+}
+function saveCredentials(c) {
+  writeFileAtomic0600(credentialsPath(), JSON.stringify(c, null, 2) + "\n");
+}
+function deleteCredentials() {
+  fs2.rmSync(credentialsPath(), { force: true });
+}
+function resolveAuthToken(cfg) {
+  const c = loadCredentials();
+  if (c?.github?.token) cfg.token = c.github.token;
+}
+
 // src/index.ts
 var { stdin, stdout, stderr } = process2;
 function assertNodeVersion() {
@@ -554,6 +776,9 @@ var HELP = `susumai \u2014 \u30BB\u30EB\u30D5\u30DB\u30B9\u30C8 DeepSeek R1 (Oll
   susumai config set [\u30AA\u30D7\u30B7\u30E7\u30F3]  \u8A2D\u5B9A\u3092\u66F4\u65B0\uFF08\u6307\u5B9A\u3057\u305F\u30AD\u30FC\u3060\u3051\uFF09
   susumai config get             \u73FE\u5728\u306E\u8A2D\u5B9A\u3092\u8868\u793A\uFF08token \u306F\u30DE\u30B9\u30AF\uFF09
   susumai config path             \u8A2D\u5B9A\u30D5\u30A1\u30A4\u30EB\u306E\u7D76\u5BFE\u30D1\u30B9\u3092\u8868\u793A
+  susumai login                   GitHub \u30A2\u30AB\u30A6\u30F3\u30C8\u3067\u30ED\u30B0\u30A4\u30F3\uFF08device flow\uFF09
+  susumai logout                  \u4FDD\u5B58\u3057\u305F\u8A8D\u8A3C\u60C5\u5831 (credentials.json) \u3092\u524A\u9664
+  susumai auth status             \u30ED\u30B0\u30A4\u30F3\u72B6\u614B\u3068 token \u306E\u6709\u7121\u3092\u8868\u793A
 
 config set \u306E\u30AA\u30D7\u30B7\u30E7\u30F3:
   --url <url>        \u30C8\u30F3\u30CD\u30EB\u306E base URL\uFF08\u4F8B https://xxxx.trycloudflare.com\uFF09
@@ -665,6 +890,46 @@ async function runConfig(rest, values) {
   );
   process2.exit(2);
 }
+async function runLogin() {
+  try {
+    const { token, login, id } = await deviceLogin();
+    saveCredentials({
+      github: { token, login, id, obtainedAt: (/* @__PURE__ */ new Date()).toISOString() }
+    });
+    stdout.write(`\u30ED\u30B0\u30A4\u30F3\u3057\u307E\u3057\u305F\uFF08@${login}\uFF09
+`);
+  } catch (err) {
+    fail(err);
+  }
+}
+function runLogout() {
+  deleteCredentials();
+  stdout.write(
+    "credentials \u3092\u524A\u9664\u3057\u307E\u3057\u305F\u3002config.json \u306E token \u306F\u3001\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u308C\u3070\u6709\u52B9\u306A\u307E\u307E\u3067\u3059\u3002\n"
+  );
+}
+function runAuthStatus(rest) {
+  const sub = rest[0];
+  if (sub !== void 0 && sub !== "status") {
+    stderr.write(`auth: \u672A\u77E5\u306E\u30B5\u30D6\u30B3\u30DE\u30F3\u30C9\u300C${sub}\u300D\uFF08status\uFF09
+usage: susumai auth status
+`);
+    process2.exit(2);
+  }
+  const creds = loadCredentials();
+  const masked = maskedConfig(loadConfig());
+  const configToken = typeof masked.token === "string" ? masked.token : null;
+  if (creds?.github?.token) {
+    stdout.write(`\u30ED\u30B0\u30A4\u30F3\u6E08\u307F: @${creds.github.login}\uFF08id ${creds.github.id}\uFF09
+`);
+  } else {
+    stdout.write("\u30ED\u30B0\u30A4\u30F3\u3057\u3066\u3044\u307E\u305B\u3093\uFF08`susumai login` \u3067\u30ED\u30B0\u30A4\u30F3\u3067\u304D\u307E\u3059\uFF09\n");
+  }
+  stdout.write(
+    configToken ? `config.json \u306E token: \u3042\u308A\uFF08${configToken}\uFF09
+` : "config.json \u306E token: \u306A\u3057\n"
+  );
+}
 async function runOneShot(cfg, prompt) {
   const history = new History();
   const ac = new AbortController();
@@ -745,7 +1010,20 @@ async function main() {
     await runConfig(positionals.slice(1), values);
     return;
   }
+  if (positionals[0] === "login") {
+    await runLogin();
+    return;
+  }
+  if (positionals[0] === "logout") {
+    runLogout();
+    return;
+  }
+  if (positionals[0] === "auth") {
+    runAuthStatus(positionals.slice(1));
+    return;
+  }
   const cfg = loadConfig();
+  resolveAuthToken(cfg);
   if (values["no-stream"]) cfg.stream = false;
   try {
     assertUrl(cfg);

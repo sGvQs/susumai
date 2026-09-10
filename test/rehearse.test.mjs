@@ -15,6 +15,8 @@ import {
   isTunnelFatalStatus,
   describeTunnelProbe,
   isPerRunCloudflaredLog,
+  dnsFailureHint,
+  shouldTryPublicDns,
 } from '../rehearsal/rehearse.mjs';
 
 // --- trycloudflare URL 抽出 -------------------------------------------------
@@ -123,6 +125,26 @@ test('isPerRunCloudflaredLog: cloudflared.<pid>.<ts>.log だけ true', () => {
   assert.equal(isPerRunCloudflaredLog('proxy.12345.1700000000000.log'), false);
   assert.equal(isPerRunCloudflaredLog('cloudflared.12345.1700000000000.log.bak'), false);
   assert.equal(isPerRunCloudflaredLog('config.json'), false);
+});
+
+// --- トンネル host の DNS 解決待ち（c-ares）の純関数 --------------------
+
+test('dnsFailureHint: c-ares コード → 文言', () => {
+  assert.match(dnsFailureHint('ENOTFOUND'), /ENOTFOUND.*未公開/);
+  assert.match(dnsFailureHint('ENODATA'), /ENODATA.*未伝播/);
+  assert.match(dnsFailureHint('ETIMEOUT'), /ETIMEOUT.*タイムアウト/);
+  assert.match(dnsFailureHint('ESERVFAIL'), /SERVFAIL/);
+  assert.match(dnsFailureHint('EREFUSED'), /ブロック網/);
+  assert.match(dnsFailureHint('SOMETHING_NEW'), /SOMETHING_NEW.*DNS 解決失敗/);
+});
+
+test('shouldTryPublicDns: fallbackAfterMs 以上でのみ true', () => {
+  assert.equal(shouldTryPublicDns(0, 20_000), false);
+  assert.equal(shouldTryPublicDns(19_999, 20_000), false);
+  assert.equal(shouldTryPublicDns(20_000, 20_000), true);
+  assert.equal(shouldTryPublicDns(60_000, 20_000), true);
+  assert.equal(shouldTryPublicDns(NaN, 20_000), false);
+  assert.equal(shouldTryPublicDns(20_000, Infinity), false);
 });
 
 // --- proxy 3段チェーン（ステータス → 判定 の写像）------------------------

@@ -2,3 +2,9 @@ node_modules/
 *.log
 .DS_Store
 rehearsal/.xdg/
+
+# 実 GitHub アカウント許可リスト（テンプレートの allowlist.example.json だけ追跡する）
+rehearsal/allowlist*.json
+!rehearsal/allowlist.example.json
+# proxy の状態ファイル（現状は in-memory のみだが将来の書き出しに備える）
+rehearsal/*.state.json

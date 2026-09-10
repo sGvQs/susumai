@@ -12,6 +12,8 @@ import {
 } from './config.ts';
 import { checkHealth, warmup, chatStream } from './client.ts';
 import { History } from './history.ts';
+import { deviceLogin } from './auth.ts';
+import { deleteCredentials, loadCredentials, resolveAuthToken, saveCredentials } from './credentials.ts';
 
 const { stdin, stdout, stderr } = process;
 
@@ -51,6 +53,9 @@ const HELP = `susumai — セルフホスト DeepSeek R1 (Ollama) と話す CLI
   susumai config set [オプション]  設定を更新（指定したキーだけ）
   susumai config get             現在の設定を表示（token はマスク）
   susumai config path             設定ファイルの絶対パスを表示
+  susumai login                   GitHub アカウントでログイン（device flow）
+  susumai logout                  保存した認証情報 (credentials.json) を削除
+  susumai auth status             ログイン状態と token の有無を表示
 
 config set のオプション:
   --url <url>        トンネルの base URL（例 https://xxxx.trycloudflare.com）
@@ -190,6 +195,50 @@ async function runConfig(rest: string[], values: CliValues): Promise<void> {
   process.exit(2);
 }
 
+/** `susumai login` — GitHub device flow を実行し credentials.json に保存する。 */
+async function runLogin(): Promise<void> {
+  try {
+    const { token, login, id } = await deviceLogin();
+    saveCredentials({
+      github: { token, login, id, obtainedAt: new Date().toISOString() },
+    });
+    stdout.write(`ログインしました（@${login}）\n`);
+  } catch (err) {
+    fail(err);
+  }
+}
+
+/** `susumai logout` — credentials.json を削除する。config.json の token は触らない。 */
+function runLogout(): void {
+  deleteCredentials();
+  stdout.write(
+    'credentials を削除しました。config.json の token は、設定されていれば有効なままです。\n',
+  );
+}
+
+/** `susumai auth status` — ログイン状態と config.json token の有無を表示する。 */
+function runAuthStatus(rest: string[]): void {
+  const sub = rest[0];
+  // `config` 経路（未知サブコマンドは exit 2）と揃える。`susumai auth` 単独は status 扱いで許容。
+  if (sub !== undefined && sub !== 'status') {
+    stderr.write(`auth: 未知のサブコマンド「${sub}」（status）\nusage: susumai auth status\n`);
+    process.exit(2);
+  }
+  const creds = loadCredentials();
+  const masked = maskedConfig(loadConfig());
+  const configToken = typeof masked.token === 'string' ? masked.token : null;
+  if (creds?.github?.token) {
+    stdout.write(`ログイン済み: @${creds.github.login}（id ${creds.github.id}）\n`);
+  } else {
+    stdout.write('ログインしていません（`susumai login` でログインできます）\n');
+  }
+  stdout.write(
+    configToken
+      ? `config.json の token: あり（${configToken}）\n`
+      : 'config.json の token: なし\n',
+  );
+}
+
 async function runOneShot(cfg: Config, prompt: string): Promise<void> {
   const history = new History();
   const ac = new AbortController();
@@ -280,8 +329,23 @@ async function main(): Promise<void> {
     await runConfig(positionals.slice(1), values);
     return;
   }
+  if (positionals[0] === 'login') {
+    await runLogin();
+    return;
+  }
+  if (positionals[0] === 'logout') {
+    runLogout();
+    return;
+  }
+  if (positionals[0] === 'auth') {
+    runAuthStatus(positionals.slice(1));
+    return;
+  }
 
   const cfg = loadConfig();
+  // credentials.json に GitHub トークンがあれば cfg.token を上書きする（1回だけ・
+  // assertUrl / checkHealth より前）。config サブコマンド経路は通らない。
+  resolveAuthToken(cfg);
   if (values['no-stream']) cfg.stream = false;
 
   try {

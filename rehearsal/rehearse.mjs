@@ -22,6 +22,9 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
+import https from 'node:https';
+import dns from 'node:dns';
+import net from 'node:net';
 import readline from 'node:readline';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -161,6 +164,38 @@ export function describeTunnelProbe({ errCode, status, bodyPrefix } = {}) {
     return note ? `${status} — ${note}${b}` : `HTTP ${status}${b}`;
   }
   return '不明';
+}
+
+/**
+ * c-ares（dns.promises.Resolver）が返すエラーコードを人間向けの短評にする純関数。
+ * トンネル host の DNS 解決待ちの各リトライ行と HALT メッセージで使う。
+ * getaddrinfo（EAI_*）ではなく c-ares（E*）のコード体系。
+ */
+export function dnsFailureHint(errCode) {
+  const map = {
+    ENOTFOUND: 'レコード未公開（NXDOMAIN・エッジ未伝播）',
+    ENODATA: 'A レコードなし（未伝播）',
+    ESERVFAIL: 'ネームサーバが SERVFAIL',
+    ETIMEOUT: 'ネームサーバ応答なし（タイムアウト）',
+    EREFUSED: 'ネームサーバに拒否された（ブロック網?）',
+    ECONNREFUSED: 'ネームサーバへ接続拒否',
+    EBADRESP: 'ネームサーバの応答が不正',
+    ECANCELLED: 'DNS 問い合わせがキャンセルされた',
+  };
+  return `${errCode} — ${map[errCode] ?? 'DNS 解決失敗'}`;
+}
+
+/**
+ * システム設定のネームサーバで fallbackAfterMs 以上解決できなかったら public DNS
+ * （1.1.1.1 / 8.8.8.8）へフォールバックすべきか。*.trycloudflare.com を丸ごとブロック
+ * する網（過去に BIGLOBE で踏んだ）に備える。非有限は false。
+ */
+export function shouldTryPublicDns(elapsedMs, fallbackAfterMs) {
+  return (
+    Number.isFinite(elapsedMs) &&
+    Number.isFinite(fallbackAfterMs) &&
+    elapsedMs >= fallbackAfterMs
+  );
 }
 
 /** proxy 同一性チェーン 第1段: :8787 の LISTEN プロセスが rehearsal proxy か。 */
@@ -824,43 +859,175 @@ function promptLine(question) {
   });
 }
 
+/** public DNS フォールバック先（システム servers が *.trycloudflare.com を引けない網用）。 */
+const PUBLIC_DNS_SERVERS = ['1.1.1.1', '8.8.8.8'];
+
+/**
+ * 事前解決した IP に対して GET https://<host>/api/tags を投げる。
+ * 接続先アドレスは custom lookup で渡した ip に固定し、getaddrinfo（＝macOS の
+ * mDNSResponder のネガティブキャッシュ）を一切踏まない。TLS servername と Host
+ * ヘッダは元の host 名のまま保つので証明書検証は壊れない。
+ * 戻り値は httpReq と同形 { status, text, json }。タイムアウトは code 'AbortError' で reject。
+ */
+function probeTagsViaIp(baseUrl, host, ip, headers, timeoutMs) {
+  const u = new URL('/api/tags', baseUrl);
+  const family = net.isIPv6(ip) ? 6 : 4;
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        host,
+        servername: host,
+        port: u.port || 443,
+        path: u.pathname + u.search,
+        method: 'GET',
+        headers: { host, ...headers },
+        timeout: timeoutMs,
+        lookup: (_hostname, opts, cb) =>
+          opts && opts.all
+            ? cb(null, [{ address: ip, family }])
+            : cb(null, ip, family),
+      },
+      (res) => {
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => {
+          data += c;
+        });
+        res.on('error', reject); // 応答受信中のソケット切断を uncaught にしない
+        res.on('end', () => {
+          let json = null;
+          try {
+            json = JSON.parse(data);
+          } catch {
+            /* 非 JSON はそのまま */
+          }
+          resolve({ status: res.statusCode, text: data, json });
+        });
+      },
+    );
+    req.on('timeout', () => {
+      req.destroy(Object.assign(new Error('probe timeout'), { code: 'AbortError' }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 /**
  * トンネル越し GET /api/tags が 200＋期待形状になるまで待つ。
+ *
+ * readiness ポーリングは c-ares（dns.promises.Resolver、設定済みネームサーバに直問い合わせ）で行う。
+ * Node の fetch は getaddrinfo 経由なので、macOS の mDNSResponder が quick tunnel 作成直後の
+ * NXDOMAIN を数分ネガティブキャッシュすると、レコードが実在しても 180s 失敗し続けた
+ * （HALT 後に dscacheutil -flushcache が必要だった）。c-ares はそのキャッシュを飛ばす。
+ * HTTP プローブは resolve4 で得た IP を直に叩く（probeTagsViaIp。SNI / Host は host 名のまま）。
+ *
  * cloudflared quick tunnel はエッジに伝播するまで初回リクエストが通らない。
  * 2026-09-04 の実機テストで、30s 窓では初回 200 に届かず Phase 3b が2連続 HALT した。
  * 上限は既定 180s（env REHEARSE_TUNNEL_WAIT_MS で上書き可）。間隔は tunnelPollDelayMs のバックオフ。
- * sleep は最大 5s なので SIGINT はその範囲で効く（3分ブロックにはならない）。
+ * システム servers で REHEARSE_DNS_FALLBACK_MS（既定 20s）引けなければ public DNS へ1回フォールバック。
+ * 1 イテレーションのブロックは resolve4（最大 ~6s）＋ フォールバック再 resolve（~6s）＋ IP ごと
+ * 最大 5s プローブ ＋ sleep 最大 5s。SIGINT はこの範囲で効く（3分ブロックにはならない）。
+ * 上限（budgetMs）の超過は DNS 後・IP ループ内でも都度チェックしてオーバーシュートを抑える。
  */
 async function verifyTunnel(url, token) {
   const budgetMs = Number.parseInt(process.env.REHEARSE_TUNNEL_WAIT_MS ?? '', 10) || 180_000;
   const budgetS = Math.round(budgetMs / 1000);
+  const fallbackAfterMs =
+    Number.parseInt(process.env.REHEARSE_DNS_FALLBACK_MS ?? '', 10) || 20_000;
+  const host = new URL(url).hostname;
+  const resolver = new dns.promises.Resolver({ timeout: 3_000, tries: 2 });
+  let usingPublicDns = false;
   const start = Date.now();
   let attempt = 0;
 
   for (;;) {
     attempt++;
+    const elapsed = Date.now() - start;
+    const elapsedS = Math.round(elapsed / 1000);
+
+    // --- 1) readiness: c-ares でトンネル host を直問い合わせ（mDNSResponder を飛ばす）---
+    let addrs = [];
+    let dnsErr = null;
+    try {
+      addrs = await resolver.resolve4(host);
+    } catch (e) {
+      dnsErr = e?.code || e?.name || 'ERR';
+    }
+
+    // システム servers で引けない状態が fallbackAfterMs 続いたら public DNS へ（1回だけ）。
+    if (
+      (dnsErr || addrs.length === 0) &&
+      !usingPublicDns &&
+      shouldTryPublicDns(elapsed, fallbackAfterMs)
+    ) {
+      usingPublicDns = true;
+      resolver.setServers(PUBLIC_DNS_SERVERS);
+      log(
+        `  DNS: システム servers で ${elapsedS}s 解決できず → ${PUBLIC_DNS_SERVERS.join(
+          ', ',
+        )} にフォールバック`,
+      );
+      try {
+        addrs = await resolver.resolve4(host);
+        dnsErr = null;
+      } catch (e) {
+        dnsErr = e?.code || e?.name || 'ERR';
+      }
+    }
+
+    if (dnsErr || addrs.length === 0) {
+      const desc = dnsFailureHint(dnsErr || 'ENODATA');
+      const via = usingPublicDns ? ' via public DNS' : '';
+      // フォールバック再 resolve の分を含めて経過を採り直す（オーバーシュート抑制）。
+      const now = Date.now() - start;
+      const nowS = Math.round(now / 1000);
+      if (now >= budgetMs) {
+        haltTunnelUnpropagated(
+          url,
+          token,
+          `トンネル host (${host}) が上限 ${budgetS}s 以内に DNS 解決できませんでした（最後: ${desc}${via}）`,
+        );
+      }
+      log(`  トンネル検証待ち ${nowS}s / 上限 ${budgetS}s (DNS ${desc}${via})`);
+      await sleep(tunnelPollDelayMs(now));
+      continue;
+    }
+
+    // --- 2) HTTP プローブ: 事前解決した IP を順に試す（SNI / Host は host 名のまま）---
     let errCode = null;
     let status = null;
     let bodyPrefix = null;
     let shaped = false;
-    try {
-      const r = await httpReq('GET', `${url}/api/tags`, bearer(token), 5000);
-      status = r.status;
-      bodyPrefix = (r.text || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-      shaped =
-        status === 200 &&
-        r.json &&
-        Array.isArray(r.json.models) &&
-        tagsHasModel(r.json, REHEARSAL_MODEL);
-    } catch (e) {
-      errCode = e?.cause?.code || e?.code || e?.name || 'ERR';
+    for (const ip of addrs) {
+      // resolve4 / フォールバックで budget を食い切っていたら残り IP は試さない。
+      if (Date.now() - start >= budgetMs) break;
+      try {
+        const r = await probeTagsViaIp(url, host, ip, bearer(token), 5000);
+        status = r.status;
+        bodyPrefix = (r.text || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        shaped =
+          status === 200 &&
+          r.json &&
+          Array.isArray(r.json.models) &&
+          tagsHasModel(r.json, REHEARSAL_MODEL);
+        errCode = null;
+        if (shaped || (status !== null && isTunnelFatalStatus(status))) break;
+      } catch (e) {
+        errCode = e?.cause?.code || e?.code || e?.name || 'ERR';
+      }
     }
 
-    const elapsed = Date.now() - start;
-    const elapsedS = Math.round(elapsed / 1000);
+    // 経過はイテレーション先頭ではなくプローブ完了時点で採り直す（オーバーシュート抑制）。
+    const now = Date.now() - start;
+    const nowS = Math.round(now / 1000);
 
     if (shaped) {
-      log(`  トンネル検証 OK (${elapsedS}s / ${attempt} 回目)`);
+      log(
+        `  トンネル検証 OK (${nowS}s / ${attempt} 回目${
+          usingPublicDns ? ' / public DNS' : ''
+        })`,
+      );
       return;
     }
 
@@ -868,11 +1035,11 @@ async function verifyTunnel(url, token) {
 
     // 401 は待っても直らない（トークン不一致）。即打ち切り。
     if (status !== null && isTunnelFatalStatus(status)) {
-      log(`  トンネル検証 ${elapsedS}s (${desc})`);
+      log(`  トンネル検証 ${nowS}s (${desc})`);
       haltTunnelUnpropagated(url, token, `トンネル検証で ${desc}（待っても直りません）`);
     }
 
-    if (elapsed >= budgetMs) {
+    if (now >= budgetMs) {
       haltTunnelUnpropagated(
         url,
         token,
@@ -880,8 +1047,8 @@ async function verifyTunnel(url, token) {
       );
     }
 
-    log(`  トンネル検証待ち ${elapsedS}s / 上限 ${budgetS}s (${desc})`);
-    await sleep(tunnelPollDelayMs(elapsed));
+    log(`  トンネル検証待ち ${nowS}s / 上限 ${budgetS}s (DNS ${addrs.join(', ')} / ${desc})`);
+    await sleep(tunnelPollDelayMs(now));
   }
 }
 
