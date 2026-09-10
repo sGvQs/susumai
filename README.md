@@ -12,9 +12,9 @@ npm i -g susumai
 
 Node.js >= 22.18 が必要です。ビルド済みの `dist/` を同梱しているので、インストール時にビルドは走りません（devDependencies も不要）。
 
-`susumai login` / `susumai logout` / `susumai auth status`（GitHub アカウントでのログイン）は **0.2.0 以降**の機能です。registry の 0.2.0 が公開されるまでは、下の副経路（`npm i -g github:sGvQs/susumai`）で入れれば同じ機能が使えます。
+`susumai login` / `susumai logout` / `susumai auth status`（GitHub アカウントでのログイン）は **0.2.0 以降**の機能です。主経路の `npm i -g susumai` で 0.2.0（login 入り）が普通に入ります。
 
-GitHub リポジトリから直接入れることもできます（副経路）:
+registry を使いたくない、または特定のタグ／コミットに固定して入れたい場合は、GitHub リポジトリから直接入れる副経路もあります:
 
 ```
 npm i -g github:sGvQs/susumai            # 最新
@@ -59,21 +59,25 @@ susumai "Rust の所有権を一言で"   # ワンショット
 echo "要約して" | susumai       # パイプ入力
 ```
 
-思考（thinking）はデフォルトで淡色表示、本文は通常色。会話履歴は直近 16 ターンのみ保持し、
-超過分は Ollama 側が左トランケートします。
+思考（thinking）はデフォルトで淡色表示、本文は通常色。会話履歴は CLI 側で直近 16 ターンのみ保持します。
+そのうえで `--num-ctx` のトークン上限を超えた分は Ollama 側が左トランケートします。
 
 ## サーバ（トンネル）の立て方
 
-定常運用は named tunnel（`llm.susumai.net`）＋ cloudflared / proxy の launchd 常駐です。その手順は `50_Meta/Gamebook_susumai_auth` と `ops/README.md` を参照してください。
-以下は開発時に quick tunnel で試す場合の記述です。
+### 定常運用
 
-トンネルの立て方はリポジトリの `rehearsal/` を参照してください（公開パッケージには含まれません）。
-`rehearsal/proxy.mjs` 冒頭のコメントを参照してください（allowlist + Bearer のゼロ依存プロキシ）。
-`trycloudflare` の quick tunnel は検証用です（URL が揮発性・本番不可）。
-`deepseek-r1:32b` は 24GB 単機では非推奨です（`deepseek-r1:8b` を推奨）。
+named tunnel（固定 URL `https://llm.susumai.net`）＋ cloudflared / proxy の launchd 常駐です。
+手順・インスタンス化・plist はリポジトリ内の `ops/README.md` を正とします（設計の経緯は作者の Vault 内 `Gamebook_susumai_auth` にあります）。
+proxy は GitHub アカウント許可リストで認証します。`deepseek-r1:32b` は 24GB 単機では非推奨です（`deepseek-r1:8b` を推奨）。
 
-`trycloudflare.com` のサブドメインは ISP や社内 DNS が丸ごとブロックすることがあります（`dig` で `REFUSED` や `not found` が返る。2026-09-04 に実際に踏みました）。
-その場合はそのマシンの DNS リゾルバを `1.1.1.1` / `8.8.8.8` に変更するか、quick tunnel をやめて named tunnel を使ってください。
+### 開発時にローカルで試すとき（参考）
+
+quick tunnel でトンネルを一時的に立てる場合の参考です。定常運用には使いません。
+
+- トンネルの立て方はリポジトリの `rehearsal/` を参照してください（公開パッケージには含まれません）。
+- `rehearsal/proxy.mjs` 冒頭のコメントを参照してください（allowlist + Bearer のゼロ依存プロキシ）。
+- `trycloudflare` の quick tunnel は検証用です（URL が揮発性・本番不可）。
+- `trycloudflare.com` のサブドメインは ISP や社内 DNS が丸ごとブロックすることがあります（`dig` で `REFUSED` や `not found` が返る。2026-09-04 に実際に踏みました）。その場合はそのマシンの DNS リゾルバを `1.1.1.1` / `8.8.8.8` に変更するか、quick tunnel をやめて named tunnel を使ってください。
 
 ## リポジトリ
 

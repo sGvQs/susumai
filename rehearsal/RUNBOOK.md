@@ -2,7 +2,7 @@
 
 > これは認証導入前の quick tunnel ＋ 共有 Bearer トークン経路の記録です。定常運用（GitHub アカウントでのログイン・固定 URL `llm.susumai.net`・cloudflared / proxy の launchd 常駐）は `[[50_Meta/Gamebook_susumai_auth]]` を正とします。以下は rehearse（検証）フロー向けで、§5 の1点訂正と §8 の追加（段階3）を除き本文はそのままです。
 
-本線は **`npm run rehearse`**（`rehearsal/rehearse.mjs`）。今日 end-to-end で通った。
+本線は **`npm run rehearse`**（`rehearsal/rehearse.mjs`）。end-to-end で通ることを確認済み。
 この文書はその周辺だけを持つ: 全体像の理解／rehearse が止まって聞いてきたときの対処（§2）／rehearse.mjs 自体が壊れたときの手動フォールバック（§6）。
 
 詳細はここに書き写さない。proxy の仕様は `rehearsal/proxy.mjs` 冒頭コメント、既知の挙動・go/no-go・タイムアウトの背景は `rehearsal/SPIKE_RESULTS.md`。
@@ -28,7 +28,7 @@ REPL は別端末で叩く。rehearse が Phase 5 で起動コマンド（`XDG_C
 | :--- | :--- |
 | Ollama が応答しない | `ollama serve`（Ollama.app 起動でも可）。または `npm run rehearse -- --start-ollama` |
 | モデルが無い | `ollama pull deepseek-r1:8b`（約 5.2GB） |
-| `:8787` が別プロセスに使われている | その proxy を落とす／ポート事情を確認して再実行 |
+| `:8787` が別プロセスに使われている | その proxy を落とす／ポート事情を確認して再実行。**本番 proxy が launchd 常駐しているマシンでは先に §8**（`launchctl bootout` してから rehearse。`pkill` 不可） |
 | 既存 proxy のトークンが不明・不一致 | その proxy を落として再実行（rehearse が新規トークンを発行し直す） |
 | 既存トンネルの URL が復元できない | rehearse は per-run ログから復帰を試みる。ダメなら落として再実行 |
 | Phase 2 の install / typecheck / test / build のいずれか失敗 | その出力を確認（rehearse のバグではなくコード側） |
