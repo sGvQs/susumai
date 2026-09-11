@@ -1,0 +1,55 @@
+name: Publish
+
+# GitHub Release を公開した時だけ走る。npm への認証は Trusted Publishing（OIDC）で、
+# 長期トークンはこのリポジトリのどこにも保存しない。
+#
+# 前提（npmjs.com 側で一度だけ設定する。このワークフローだけでは完結しない）:
+#   susumai パッケージの Settings → Trusted Publisher → GitHub Actions を追加し、
+#   Organization/User: sGvQs, Repository: susumai,
+#   Workflow filename: .github/workflows/publish.yml, Environment: (空欄) を登録する。
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: npm を Trusted Publishing 対応版に更新
+        run: npm install -g npm@latest
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: release タグと package.json の version が一致するか確認
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          TAG_VERSION="${TAG#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::release タグ ($TAG) と package.json の version ($PKG_VERSION) が一致しません"
+            exit 1
+          fi
+
+      - name: npm publish
+        run: |
+          if [ "${{ github.event.release.prerelease }}" = "true" ]; then
+            npm publish --provenance --access public --tag next
+          else
+            npm publish --provenance --access public
+          fi

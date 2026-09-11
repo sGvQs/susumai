@@ -1,8 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { parseDeviceCodeResponse, classifyPollResponse, nextInterval, clientId, isNonInteractive } =
-  await import('../src/auth.ts');
+const {
+  parseDeviceCodeResponse,
+  classifyPollResponse,
+  classifyRefreshResponse,
+  toTokenGrant,
+  nextInterval,
+  clientId,
+  isNonInteractive,
+} = await import('../src/auth.ts');
 
 // --- parseDeviceCodeResponse --------------------------------------------
 
@@ -51,6 +58,65 @@ test('classifyPollResponse: access_token → { token }', () => {
   assert.deepEqual(classifyPollResponse({ access_token: 'gho_tok', token_type: 'bearer' }), {
     token: 'gho_tok',
   });
+});
+
+test('classifyPollResponse: refresh_token / expires_in ありなら全フィールドを載せる', () => {
+  assert.deepEqual(
+    classifyPollResponse({
+      access_token: 'gho_tok',
+      refresh_token: 'ghr_tok',
+      expires_in: 28800,
+      refresh_token_expires_in: 15897600,
+      token_type: 'bearer',
+    }),
+    {
+      token: 'gho_tok',
+      refreshToken: 'ghr_tok',
+      expiresIn: 28800,
+      refreshTokenExpiresIn: 15897600,
+    },
+  );
+});
+
+test('classifyPollResponse: refresh_token 等が無ければ従来どおり { token } のみ（後方互換）', () => {
+  assert.deepEqual(classifyPollResponse({ access_token: 'gho_tok' }), { token: 'gho_tok' });
+});
+
+test('toTokenGrant: 非正 / 型不一致のフィールドは省略する', () => {
+  assert.deepEqual(toTokenGrant({ access_token: 't', expires_in: 0, refresh_token: '' }), {
+    token: 't',
+  });
+  assert.deepEqual(toTokenGrant({ access_token: 't', expires_in: '28800' }), { token: 't' });
+});
+
+// --- classifyRefreshResponse ------------------------------------------
+
+test('classifyRefreshResponse: 正常応答は TokenGrant（新 refresh_token 同梱）', () => {
+  assert.deepEqual(
+    classifyRefreshResponse({
+      access_token: 'gho_new',
+      refresh_token: 'ghr_new',
+      expires_in: 28800,
+      refresh_token_expires_in: 15897600,
+    }),
+    {
+      token: 'gho_new',
+      refreshToken: 'ghr_new',
+      expiresIn: 28800,
+      refreshTokenExpiresIn: 15897600,
+    },
+  );
+});
+
+test('classifyRefreshResponse: bad_refresh_token → invalid_grant', () => {
+  assert.equal(classifyRefreshResponse({ error: 'bad_refresh_token' }), 'invalid_grant');
+  assert.equal(classifyRefreshResponse({ error: 'invalid_grant' }), 'invalid_grant');
+  assert.equal(classifyRefreshResponse({ error: 'unauthorized' }), 'invalid_grant');
+});
+
+test('classifyRefreshResponse: 未知 error / 非オブジェクトは throw', () => {
+  assert.throws(() => classifyRefreshResponse({ error: 'wat' }), /予期しない/);
+  assert.throws(() => classifyRefreshResponse(null), /解釈できません/);
 });
 
 test('classifyPollResponse: authorization_pending → pending', () => {

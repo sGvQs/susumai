@@ -2,6 +2,8 @@
 
 セルフホストした Ollama（DeepSeek R1）に、Cloudflare トンネル越しで話すゼロ依存 CLI。
 
+クイックに使うなら [QUICKSTART.md](QUICKSTART.md)、ホスト運用は [HOSTING.md](HOSTING.md)。
+
 ## インストール
 
 主経路（registry、**0.2.0 以降**）:
