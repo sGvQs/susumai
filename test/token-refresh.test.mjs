@@ -191,11 +191,17 @@ test('tryRefresh: invalid_grant → false ＋ ファイル無傷', async () => {
 test('refreshAccessToken: fetch タイムアウト（AbortSignal 発火）→ 例外', async () => {
   const real = globalThis.fetch;
   // signal を尊重して abort で reject するが、それ以外では永久に解決しない fetch。
+  // AbortSignal.timeout() の内部タイマーは unref（プロセスを生かし続けない）なので、
+  // このテストの間イベントループを維持する ref 付きタイマーを別途持つ。無いと、
+  // 発火前に「イベントループが空」と判定されてテストごと cancel される
+  // （Node 22 で再現。Node 24 では起きないバージョン依存の挙動）。
   globalThis.fetch = (_url, init) =>
     new Promise((_resolve, reject) => {
-      init.signal.addEventListener('abort', () =>
-        reject(init.signal.reason ?? new Error('aborted')),
-      );
+      const keepAlive = setInterval(() => {}, 1000);
+      init.signal.addEventListener('abort', () => {
+        clearInterval(keepAlive);
+        reject(init.signal.reason ?? new Error('aborted'));
+      });
     });
   try {
     await assert.rejects(
