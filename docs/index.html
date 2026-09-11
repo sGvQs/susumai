@@ -1,0 +1,734 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>susumai — 自分のマシンで動く、自分だけの LLM</title>
+<meta name="description" content="自分の Mac・自分のドメイン・自分の GitHub アカウントだけで、どこからでも使えるセルフホスト LLM を持つ。susumai の経路・認証・常駐の構成と、始め方。">
+<meta property="og:title" content="susumai">
+<meta property="og:description" content="自分の Mac・自分のドメインで動く、GitHub 認証つきのセルフホスト LLM ゲートウェイ。">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://docs.susumai.net/">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%B0%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  :root{
+    color-scheme: light dark;
+
+    --paper:#e7edf0;
+    --card:#ffffff;
+    --inset:#f2f6f8;
+    --ink:#0f1619;
+    --ink-2:#4a5a63;
+    --ink-3:#728690;
+    --line:#c9d5da;
+    --hair:#dde6ea;
+    --signal:#0a6d82;
+    --signal-soft:#d6ebf0;
+    --ok:#15803d;
+    --warn:#b45309;
+    --deny:#b3241d;
+
+    --sans:'IBM Plex Sans', system-ui, -apple-system, 'Helvetica Neue', sans-serif;
+    --mono:'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+    --frame-grid:#e0e8ec;
+  }
+
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#0b0f12;
+      --card:#141b21;
+      --inset:#0f151a;
+      --ink:#e3ebef;
+      --ink-2:#94a5ae;
+      --ink-3:#6d7f89;
+      --line:#2b353d;
+      --hair:#212a31;
+      --signal:#38c1da;
+      --signal-soft:#123138;
+      --ok:#45c96f;
+      --warn:#e0973a;
+      --deny:#e56a60;
+      --frame-grid:#1b242b;
+    }
+  }
+
+  :root[data-theme="dark"]{
+    --paper:#0b0f12;
+    --card:#141b21;
+    --inset:#0f151a;
+    --ink:#e3ebef;
+    --ink-2:#94a5ae;
+    --ink-3:#6d7f89;
+    --line:#2b353d;
+    --hair:#212a31;
+    --signal:#38c1da;
+    --signal-soft:#123138;
+    --ok:#45c96f;
+    --warn:#e0973a;
+    --deny:#e56a60;
+    --frame-grid:#1b242b;
+  }
+
+  *{box-sizing:border-box}
+
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:15px;
+    line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  a{color:var(--signal)}
+  a:not(.chip-link){text-underline-offset:2px}
+
+  .wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+
+  /* ---- topnav ---- */
+  .topnav{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:16px 0;
+    font-family:var(--mono);font-size:13px;
+  }
+  .topnav .brand{font-weight:600;letter-spacing:0.02em;color:var(--ink)}
+  .topnav nav{display:flex;gap:18px}
+  .topnav nav a{color:var(--ink-2);text-decoration:none}
+  .topnav nav a:hover{color:var(--signal)}
+
+  /* ---- header ---- */
+  header{
+    border-top:1px solid var(--line);
+    border-bottom:1px solid var(--line);
+    padding:40px 0 30px;
+  }
+  .eyebrow{
+    font-family:var(--mono);
+    font-size:12px;
+    letter-spacing:0.14em;
+    text-transform:uppercase;
+    color:var(--signal);
+    margin:0 0 14px;
+  }
+  h1{
+    font-size:clamp(32px,5.5vw,46px);
+    font-weight:700;
+    letter-spacing:-0.02em;
+    line-height:1.06;
+    margin:0 0 14px;
+    text-wrap:balance;
+  }
+  .lede{
+    margin:0;
+    max-width:56ch;
+    color:var(--ink-2);
+    font-size:17px;
+    text-wrap:balance;
+  }
+  .chips{
+    display:flex;flex-wrap:wrap;gap:8px;
+    margin:22px 0 26px;
+    padding:0;list-style:none;
+  }
+  .chips li{
+    font-family:var(--mono);
+    font-size:11.5px;
+    letter-spacing:0.03em;
+    color:var(--ink-2);
+    border:1px solid var(--line);
+    padding:4px 9px;
+    border-radius:2px;
+  }
+  .hops{
+    display:flex;flex-wrap:wrap;align-items:center;
+    gap:6px 10px;
+    font-family:var(--mono);
+    font-size:13px;
+    color:var(--ink);
+    background:var(--card);
+    border:1px solid var(--line);
+    padding:12px 14px;
+    border-radius:3px;
+    overflow-x:auto;
+  }
+  .hops b{font-weight:500;white-space:nowrap}
+  .hops span{color:var(--signal);font-weight:600}
+
+  .toolbar{
+    display:flex;justify-content:space-between;align-items:baseline;
+    gap:16px;flex-wrap:wrap;
+    margin-top:24px;
+  }
+  .meta{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);letter-spacing:0.03em}
+  .meta a{color:var(--ink-3);text-decoration-color:var(--line)}
+  .meta a:hover{color:var(--signal)}
+  button.theme{
+    font-family:var(--mono);
+    font-size:11.5px;
+    letter-spacing:0.06em;
+    text-transform:uppercase;
+    color:var(--ink-2);
+    background:transparent;
+    border:1px solid var(--line);
+    padding:6px 11px;
+    border-radius:2px;
+    cursor:pointer;
+  }
+  button.theme:hover{border-color:var(--signal);color:var(--signal)}
+  button.theme:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+
+  /* ---- layout ---- */
+  .layout{
+    display:grid;
+    grid-template-columns:1fr;
+    gap:8px 52px;
+    padding:40px 0 64px;
+  }
+  @media (min-width:1080px){
+    .layout{grid-template-columns:196px minmax(0,1fr)}
+  }
+
+  nav.rail{align-self:start}
+  @media (min-width:1080px){ nav.rail{position:sticky;top:26px} }
+  .rail-title{
+    font-family:var(--mono);font-size:11px;letter-spacing:0.14em;
+    text-transform:uppercase;color:var(--ink-3);margin:0 0 12px;
+  }
+  .rail ol{list-style:none;margin:0;padding:0;border-top:1px solid var(--hair)}
+  .rail li{border-bottom:1px solid var(--hair)}
+  .rail a{
+    display:grid;grid-template-columns:26px 1fr;gap:8px;
+    padding:9px 2px;
+    text-decoration:none;
+    color:var(--ink-2);
+    font-size:13px;line-height:1.35;
+  }
+  .rail a .num{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+  .rail a:hover{color:var(--signal)}
+  .rail a:hover .num{color:var(--signal)}
+  .rail a:focus-visible{outline:2px solid var(--signal);outline-offset:-2px}
+  @media (max-width:1079px){
+    nav.rail{margin-bottom:28px}
+    .rail ol{display:flex;flex-wrap:wrap;border:0}
+    .rail li{border:0;width:auto}
+    .rail a{grid-template-columns:auto;border:1px solid var(--hair);border-radius:2px;padding:6px 10px;margin:0 6px 6px 0}
+  }
+
+  /* ---- plates ---- */
+  .plates{display:flex;flex-direction:column;gap:44px;min-width:0}
+
+  figure.plate{margin:0}
+  .plate-head{
+    display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;
+    padding-bottom:9px;
+    border-bottom:1px solid var(--line);
+  }
+  .plate-no{
+    font-family:var(--mono);font-size:11.5px;letter-spacing:0.12em;
+    text-transform:uppercase;color:var(--signal);
+  }
+  .plate-title{font-size:19px;font-weight:600;letter-spacing:-0.01em;margin:0}
+  .plate-cap{
+    margin:12px 0 14px;
+    color:var(--ink-2);
+    font-size:14px;
+    max-width:64ch;
+  }
+  .plate-cap a{color:inherit;text-decoration-color:var(--line)}
+  .plate-cap a:hover{color:var(--signal)}
+
+  .frame{
+    position:relative;
+    background:var(--inset);
+    background-image:radial-gradient(var(--frame-grid) 1px, transparent 1.4px);
+    background-size:15px 15px;
+    background-position:12px 12px;
+    border:1px solid var(--line);
+    border-radius:3px;
+    padding:22px 18px;
+  }
+  .frame::before,.frame::after{
+    content:"";position:absolute;width:11px;height:11px;
+    border:1.5px solid var(--signal);
+  }
+  .frame::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
+  .frame::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+
+  .holder{overflow-x:auto}
+  .holder svg{display:block;margin:0 auto;height:auto;max-width:none}
+  .mmfallback{
+    font-family:var(--mono);font-size:12px;line-height:1.5;
+    color:var(--ink-2);white-space:pre;margin:0;
+  }
+
+  figcaption.truth{
+    margin-top:11px;
+    font-family:var(--mono);
+    font-size:11.5px;
+    letter-spacing:0.02em;
+    color:var(--ink-3);
+    line-height:1.6;
+  }
+  figcaption.truth b{color:var(--ink-2);font-weight:500}
+  figcaption.truth a{color:var(--ink-3);text-decoration-color:var(--line)}
+  figcaption.truth a:hover{color:var(--signal)}
+
+  .legend{
+    display:flex;flex-wrap:wrap;gap:14px;
+    margin:12px 0 0;
+    font-family:var(--mono);font-size:11.5px;color:var(--ink-2);
+  }
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+  .sw-ok{background:#14532d}
+  .sw-warn{background:#7c4a03}
+  .sw-deny{background:#7f1d1d}
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]) .sw-ok{background:#2f6b41}
+    :root:not([data-theme="light"]) .sw-warn{background:#8a5a1c}
+    :root:not([data-theme="light"]) .sw-deny{background:#9a3b34}
+  }
+  :root[data-theme="dark"] .sw-ok{background:#2f6b41}
+  :root[data-theme="dark"] .sw-warn{background:#8a5a1c}
+  :root[data-theme="dark"] .sw-deny{background:#9a3b34}
+
+  /* ---- get-started card (plate 06) ---- */
+  .steps{margin:0;padding-left:22px;display:flex;flex-direction:column;gap:14px}
+  .steps li{padding-left:6px}
+  .steps b{font-weight:600;color:var(--ink)}
+  .steps code{
+    font-family:var(--mono);font-size:0.92em;
+    background:var(--card);border:1px solid var(--line);
+    padding:1px 5px;border-radius:2px;
+  }
+  .steps a{color:var(--signal)}
+  .closing{margin:16px 0 0;color:var(--ink-2);font-size:14px}
+
+  /* ---- footer ---- */
+  footer{
+    border-top:1px solid var(--line);
+    padding:26px 0 60px;
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--ink-3);
+    line-height:1.8;
+  }
+  footer b{color:var(--ink-2);font-weight:500}
+  footer code{color:var(--ink-2)}
+  footer a{color:var(--ink-3);text-decoration-color:var(--line)}
+  footer a:hover{color:var(--signal)}
+
+  @media (prefers-reduced-motion:no-preference){
+    figure.plate{opacity:0;transform:translateY(10px);transition:opacity .5s ease, transform .5s ease}
+    figure.plate.in{opacity:1;transform:none}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topnav">
+    <span class="brand">susumai</span>
+    <nav>
+      <a href="https://github.com/sGvQs/susumai" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://www.npmjs.com/package/susumai" target="_blank" rel="noopener">npm</a>
+    </nav>
+  </div>
+
+  <header>
+    <p class="eyebrow">Self-hosted LLM gateway</p>
+    <h1>自分の Mac に、自分だけの LLM を持つ。</h1>
+    <p class="lede">Ollama を動かせるマシンが1台あれば、GitHub アカウントでログインするだけで、どこからでも自分の LLM に話しかけられる。サーバー会社もアカウント登録も要らない。susumai はそのための zero-dep CLI と、経路を守る小さなゲートウェイ。</p>
+    <ul class="chips">
+      <li>zero-dep CLI</li>
+      <li>GitHub Device Flow</li>
+      <li>トークン自動更新</li>
+      <li>自分のドメインで固定トンネル</li>
+      <li>launchd 常駐</li>
+    </ul>
+    <div class="hops" aria-label="リクエスト経路の例">
+      <b>susumai CLI</b><span>&rarr;</span><b>llm.susumai.net</b><span>&rarr;</span><b>cloudflared</b><span>&rarr;</span><b>proxy :8787</b><span>&rarr;</span><b>Ollama :11434</b><span>&rarr;</span><b>DeepSeek R1</b>
+    </div>
+    <div class="toolbar">
+      <span class="meta">下の図は、実際に動いている構成の実例。あなたは自分のドメイン・自分の許可リストで同じ形を作れる — <a href="#p-start">始め方は Plate 06</a></span>
+      <button class="theme" type="button" id="themeBtn" aria-live="polite">テーマ切替</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="rail" aria-label="図の一覧">
+      <p class="rail-title">Plates</p>
+      <ol id="railList"></ol>
+    </nav>
+
+    <div class="plates" id="plates"></div>
+  </div>
+
+  <footer>
+    <div><b>正の所在</b></div>
+    <div>proxy 仕様 &mdash; <a href="https://github.com/sGvQs/susumai/blob/main/rehearsal/proxy.mjs" target="_blank" rel="noopener">rehearsal/proxy.mjs</a> 冒頭コメント ／ <a href="https://github.com/sGvQs/susumai/blob/main/rehearsal/SPIKE_RESULTS.md" target="_blank" rel="noopener">SPIKE_RESULTS.md</a></div>
+    <div>ホスト構築 &mdash; <a href="https://github.com/sGvQs/susumai/blob/main/ops/README.md" target="_blank" rel="noopener">ops/README.md</a></div>
+    <div>使う側 &mdash; <a href="https://github.com/sGvQs/susumai/blob/main/QUICKSTART.md" target="_blank" rel="noopener">QUICKSTART.md</a> ／ ホスト運用 &mdash; <a href="https://github.com/sGvQs/susumai/blob/main/HOSTING.md" target="_blank" rel="noopener">HOSTING.md</a></div>
+    <div>検証 &mdash; <code>npm run rehearse</code>（quick tunnel ＋ 共有 Bearer の開発用。本番稼働中は <code>:8787</code> 占有として停止）</div>
+    <div style="margin-top:10px">スナップショット 2026-09 ／ ソース &mdash; <a href="https://github.com/sGvQs/susumai" target="_blank" rel="noopener">github.com/sGvQs/susumai</a></div>
+  </footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  var GH = "https://github.com/sGvQs/susumai/blob/main/";
+
+  var PLATES = [
+    {
+      no:"01", id:"path", title:"経路と信頼境界",
+      cap:"CLI から Ollama までの一本道。Bearer トークンは公開インターネットから proxy まで運ばれ、proxy は上流 Ollama へ authorization ヘッダを渡さない（そこで消える）。<code>llm.susumai.net</code> は実例。あなたは自分のドメインに置き換える。",
+      truth:"env・キャッシュ TTL・拒否理由コードの正は <a href=\"" + GH + "rehearsal/proxy.mjs\" target=\"_blank\" rel=\"noopener\"><b>rehearsal/proxy.mjs</b></a> 冒頭コメント。",
+      src:[
+        "flowchart LR",
+        "  subgraph P[\"公開インターネット\"]",
+        "    CLI[\"susumai CLI<br/>任意の PC ・ npm ・ zero-dep\"]",
+        "  end",
+        "  subgraph E[\"Cloudflare エッジ\"]",
+        "    DNS[\"llm.susumai.net（例）<br/>CNAME → named tunnel\"]",
+        "  end",
+        "  subgraph H[\"ホスト機 ・ あなたの Mac ・ launchd 常駐\"]",
+        "    CFD[\"cloudflared<br/>tunnel run\"]",
+        "    subgraph LO[\"127.0.0.1 ループバック\"]",
+        "      PX[\"proxy :8787<br/>rehearsal/proxy.mjs\"]",
+        "      OL[\"Ollama :11434<br/>外部バインドなし\"]",
+        "      MD[\"deepseek-r1:8b（既定）<br/>好きなモデルに変更可\"]",
+        "    end",
+        "  end",
+        "  CLI -- \"HTTPS ・ Authorization: Bearer （GitHub トークン）\" --> DNS",
+        "  DNS -- \"named tunnel ・ アウトバウンド QUIC\" --> CFD",
+        "  CFD -- \"http://localhost:8787\" --> PX",
+        "  PX -- \"通過分だけ ・ Bearer は上流に渡さない\" --> OL",
+        "  OL --> MD"
+      ].join("\n")
+    },
+    {
+      no:"02", id:"login", title:"ログイン（GitHub Device Flow）",
+      cap:"susumai login。CLI 自身が Device Authorization Grant を実行する。ブラウザは自動で開かず、URL とコードを表示するだけ。手でトークンを貼る作業はない。",
+      truth:"分類ロジックは <a href=\"" + GH + "src/auth.ts\" target=\"_blank\" rel=\"noopener\"><b>src/auth.ts</b></a>、保存は <a href=\"" + GH + "src/credentials.ts\" target=\"_blank\" rel=\"noopener\"><b>src/credentials.ts</b></a>（0600）。",
+      src:[
+        "sequenceDiagram",
+        "  actor U as 使う人",
+        "  participant C as susumai CLI",
+        "  participant B as ブラウザ",
+        "  participant G as GitHub",
+        "  C->>G: POST /login/device/code （client_id）",
+        "  G-->>C: user_code ・ verification_uri ・ interval",
+        "  C-->>U: URL と user_code を表示",
+        "  U->>B: URL を開いて user_code を承認",
+        "  loop interval 秒ごと（slow_down なら +5s）",
+        "    C->>G: POST /login/oauth/access_token",
+        "    G-->>C: authorization_pending",
+        "  end",
+        "  G-->>C: access_token （+ refresh_token ・ expires_in）",
+        "  C->>G: GET /user （Bearer）",
+        "  G-->>C: login ・ id",
+        "  C->>C: credentials.json に 0600 で保存"
+      ].join("\n")
+    },
+    {
+      no:"03", id:"refresh", title:"トークン自動更新",
+      cap:"access token は数時間で失効しうる。送信前に期限が近ければ先に更新し（事前）、それでも 401 が返れば更新して 1 回だけ再送する（事後）。refresh token は単回使用でローテートし、同時実行は mkdir ロックで 1 本化する。",
+      truth:"更新の HTTP は <a href=\"" + GH + "src/auth.ts\" target=\"_blank\" rel=\"noopener\"><b>src/auth.ts</b></a> の refreshAccessToken、401 リトライは <a href=\"" + GH + "src/index.ts\" target=\"_blank\" rel=\"noopener\"><b>withAuthRetry</b></a>。",
+      src:[
+        "sequenceDiagram",
+        "  participant C as susumai CLI",
+        "  participant L as mkdir ロック",
+        "  participant G as GitHub",
+        "  participant P as proxy",
+        "  Note over C: 事前更新 — 送信前",
+        "  C->>C: expiresAt は 10 分以内か",
+        "  alt 期限が近い",
+        "    C->>L: ロック取得",
+        "    C->>G: refresh_token で更新",
+        "    G-->>C: 新 access_token + 新 refresh_token",
+        "    C->>C: credentials.json を更新（ローテート）",
+        "    C->>L: 解放",
+        "  end",
+        "  Note over C: 事後更新 — 401 を受けたら",
+        "  C->>P: POST /api/chat （Bearer）",
+        "  P-->>C: 401",
+        "  C->>G: refresh_token で更新",
+        "  alt 更新できた",
+        "    G-->>C: 新トークン",
+        "    C->>P: 同じ要求を 1 回だけ再送",
+        "    P-->>C: 200 ストリーム",
+        "  else refresh_token も失効",
+        "    G-->>C: invalid_grant",
+        "    C->>C: 「susumai login」に戻る",
+        "  end"
+      ].join("\n")
+    },
+    {
+      no:"04", id:"gate", title:"proxy の認証判定",
+      cap:"Bearer 抽出 → 認証（共有 Bearer もしくは GitHub アカウント）→ HTTP パス許可、の順。認証が通っても isAllowed（パス許可）はスキップしない。誰を通すかは、あなたが決める許可リスト（GitHub の数値 id）だけ。公開に晒しても GitHub API を叩き潰さないよう、キャッシュ・レート制限・グローバル上限・fail-closed で囲う。",
+      truth:"しきい値の env 名・既定値、fail-closed 境界の正は <a href=\"" + GH + "rehearsal/proxy.mjs\" target=\"_blank\" rel=\"noopener\"><b>rehearsal/proxy.mjs</b></a> 冒頭コメント。許可リストのテンプレは <a href=\"" + GH + "rehearsal/allowlist.example.json\" target=\"_blank\" rel=\"noopener\"><b>allowlist.example.json</b></a>。",
+      legend:true,
+      src:[
+        "flowchart TD",
+        "  A[\"要求受信\"] --> B{\"Bearer 抽出\"}",
+        "  B -- なし --> D401[\"401\"]:::deny",
+        "  B -- あり --> S{\"共有 Bearer と一致<br/>（本番は無効）\"}",
+        "  S -- 一致 --> PATH",
+        "  S -- 不一致 --> M{\"GitHub モード\"}",
+        "  M -- 無効 --> D401",
+        "  M -- 有効 --> SH{\"トークン形状\"}",
+        "  SH -- 不正 --> D401",
+        "  SH -- OK --> PC{\"正キャッシュ<br/>identity のみ ・ TTL 1h\"}",
+        "  PC -- ヒット --> IDM",
+        "  PC -- ミス --> NC{\"負キャッシュ<br/>401 時のみ ・ 短命\"}",
+        "  NC -- ヒット --> D401",
+        "  NC -- ミス --> RL{\"per-IP レート<br/>key = CF-Connecting-IP\"}",
+        "  RL -- 超過 --> D429[\"429 ・ deny:ratelimit\"]:::deny",
+        "  RL -- OK --> CAP{\"api.github.com<br/>1h グローバル上限\"}",
+        "  CAP -- 超過 --> DCAP[\"503 ・ deny:ghcap<br/>正キャッシュ済みのみ通過\"]:::warn",
+        "  CAP -- OK --> API[\"GET api.github.com/user\"]",
+        "  API -- \"到達不能 ・ 5xx ・ 不正\" --> DDOWN[\"503 ・ deny:ghdown<br/>fail-closed\"]:::warn",
+        "  API -- 401 --> D401",
+        "  API -- \"200 + id\" --> IDM{\"あなたの許可リストと id 照合\"}",
+        "  IDM -- 不一致 --> DUSER[\"403 ・ deny:user\"]:::deny",
+        "  IDM -- 一致 --> PATH{\"HTTP パス許可<br/>POST /api/chat ・ GET /api/tags のみ\"}",
+        "  PATH -- 対象外 --> DPATH[\"403 ・ deny:path\"]:::deny",
+        "  PATH -- 一致 --> FWD[\"上流へ透過<br/>authorization は渡さない\"]:::ok",
+        "  classDef deny fill:#7f1d1d,stroke:#7f1d1d,color:#ffffff;",
+        "  classDef warn fill:#7c4a03,stroke:#7c4a03,color:#ffffff;",
+        "  classDef ok fill:#14532d,stroke:#14532d,color:#ffffff;"
+      ].join("\n")
+    },
+    {
+      no:"05", id:"host", title:"ホストの常駐構成",
+      cap:"launchd の LaunchAgent 2 つ（KeepAlive・RunAtLoad、kickstart -k で 1 インスタンスに収束）。本番 proxy に共有トークンは渡さない = GitHub アカウント認証のみ。Ollama は 127.0.0.1 に閉じたまま。プレースホルダはテンプレのまま — 実パスは sed で埋める。",
+      truth:"テンプレ・インスタンス化・launchctl 手順の正は <a href=\"" + GH + "ops/README.md\" target=\"_blank\" rel=\"noopener\"><b>ops/README.md</b></a>。日々の運用は <a href=\"" + GH + "HOSTING.md\" target=\"_blank\" rel=\"noopener\"><b>HOSTING.md</b></a>。",
+      src:[
+        "flowchart TB",
+        "  subgraph LA[\"launchd LaunchAgent ・ KeepAlive ・ RunAtLoad\"]",
+        "    PP[\"com.susumai.proxy<br/>node ops/proxy-prod.mjs<br/>env: SUSUMAI_ALLOWLIST ・ SUSUMAI_PROXY_LOG<br/>（共有トークンは渡さない）\"]",
+        "    CC[\"com.susumai.cloudflared<br/>cloudflared tunnel run __TUNNEL_NAME__\"]",
+        "  end",
+        "  subgraph FS[\"ホスト機のファイル\"]",
+        "    PL[\"~/Library/LaunchAgents/*.plist<br/>雛形は ops/*.plist.template\"]",
+        "    LG[\"~/Library/Logs/susumai/<br/>proxy-access.log ほか\"]",
+        "    AL[\"あなたの allowlist.json<br/>雛形は allowlist.example.json\"]",
+        "    CY[\"~/.cloudflared/config.yml<br/>あなたのドメイン → localhost:8787\"]",
+        "  end",
+        "  subgraph CF[\"Cloudflare（あなたのアカウント）\"]",
+        "    TN[\"named tunnel\"]",
+        "    CN[\"CNAME　あなたのサブドメイン\"]",
+        "  end",
+        "  PP --> SS[\"startServer() を dynamic import<br/>単一ソース rehearsal/proxy.mjs\"]",
+        "  PP -. 読む .-> AL",
+        "  PP -. 書く .-> LG",
+        "  CC --> TN",
+        "  CC -. 読む .-> CY",
+        "  CN --> TN",
+        "  SS --> UP[\"Ollama :11434 → 好きなモデル\"]"
+      ].join("\n")
+    }
+  ];
+
+  var START = {
+    no:"06", id:"start", title:"自分で始める",
+    cap:"ここまでは図。ここからは手順。あなたの個人パソコンだけで完結する — サーバー会社もアカウント登録も要らない。",
+    html:
+      '<ol class="steps">'+
+        '<li><b>Ollama を用意する</b> — 自分のマシン（Mac / Linux）に <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> を入れ、モデルを pull する。既定は <code>deepseek-r1:8b</code>（5.2GB）。</li>'+
+        '<li><b>自分のドメインで tunnel を張る</b> — ドメインを Cloudflare に置き、<code>cloudflared tunnel create</code> で named tunnel を作る（Cloudflare Access は不要）。</li>'+
+        '<li><b>proxy を常駐させる</b> — <a href="https://github.com/sGvQs/susumai" target="_blank" rel="noopener">このリポジトリ</a>を clone し、<a href="'+GH+'ops/README.md" target="_blank" rel="noopener">ops/README.md</a> の手順で proxy と cloudflared を launchd 常駐化。自分の GitHub アカウントの数値 id を許可リストに入れる。</li>'+
+        '<li><b>CLI を入れる</b> — 使う側のマシンで <code>npm i -g susumai</code> → <code>susumai login</code> → <code>susumai config set --url https://&lt;自分のドメイン&gt;</code>。</li>'+
+      '</ol>'+
+      '<p class="closing">クライアント側だけの人は <a href="'+GH+'QUICKSTART.md" target="_blank" rel="noopener">QUICKSTART.md</a> の4行で足りる。ホストを運用する側は <a href="'+GH+'HOSTING.md" target="_blank" rel="noopener">HOSTING.md</a> に日々のコマンドをまとめてある。</p>'
+  };
+
+  // ---- build DOM ----
+  var railList = document.getElementById("railList");
+  var mount = document.getElementById("plates");
+
+  PLATES.forEach(function(p){
+    var li = document.createElement("li");
+    li.innerHTML = '<a href="#p-'+p.id+'"><span class="num">'+p.no+'</span><span>'+p.title+'</span></a>';
+    railList.appendChild(li);
+
+    var fig = document.createElement("figure");
+    fig.className = "plate";
+    fig.id = "p-" + p.id;
+
+    var legendHtml = p.legend ? (
+      '<div class="legend">'+
+      '<span><i class="sw-ok"></i>通過</span>'+
+      '<span><i class="sw-deny"></i>拒否（401 / 403 / 429）</span>'+
+      '<span><i class="sw-warn"></i>縮退（503 fail-closed）</span>'+
+      '</div>') : "";
+
+    fig.innerHTML =
+      '<div class="plate-head">'+
+        '<span class="plate-no">Plate '+p.no+'</span>'+
+        '<h2 class="plate-title">'+p.title+'</h2>'+
+      '</div>'+
+      '<p class="plate-cap">'+p.cap+'</p>'+
+      '<div class="frame"><div class="holder" data-src="'+encodeURIComponent(p.src)+'"></div></div>'+
+      legendHtml+
+      '<figcaption class="truth">正 &mdash; '+p.truth+'</figcaption>';
+
+    mount.appendChild(fig);
+  });
+
+  // ---- get-started plate（図ではなく手順） ----
+  (function(){
+    var li = document.createElement("li");
+    li.innerHTML = '<a href="#p-'+START.id+'"><span class="num">'+START.no+'</span><span>'+START.title+'</span></a>';
+    railList.appendChild(li);
+
+    var fig = document.createElement("figure");
+    fig.className = "plate";
+    fig.id = "p-" + START.id;
+    fig.innerHTML =
+      '<div class="plate-head">'+
+        '<span class="plate-no">Plate '+START.no+'</span>'+
+        '<h2 class="plate-title">'+START.title+'</h2>'+
+      '</div>'+
+      '<p class="plate-cap">'+START.cap+'</p>'+
+      '<div class="frame">'+START.html+'</div>';
+    mount.appendChild(fig);
+  })();
+
+  // ---- theme ----
+  var STORE = "susumai-docs-theme";
+  function stored(){
+    try{ return localStorage.getItem(STORE); }catch(e){ return null; }
+  }
+  function persist(v){
+    try{ localStorage.setItem(STORE, v); }catch(e){}
+  }
+  function activeTheme(){
+    var s = document.documentElement.getAttribute("data-theme");
+    if(s) return s;
+    return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  (function initTheme(){
+    var s = stored();
+    if(s === "dark" || s === "light"){
+      document.documentElement.setAttribute("data-theme", s);
+    }
+  })();
+
+  // ---- mermaid ----
+  function mermaidConfig(dark){
+    return {
+      startOnLoad:false,
+      securityLevel:"strict",
+      theme:"base",
+      flowchart:{ curve:"basis", nodeSpacing:44, rankSpacing:52, padding:10 },
+      sequence:{ mirrorActors:false, boxMargin:8, actorMargin:44, messageAlign:"center" },
+      themeVariables:{
+        fontFamily:"'IBM Plex Mono', ui-monospace, monospace",
+        fontSize:"13px",
+        lineColor: dark ? "#5f7580" : "#7f97a1",
+        textColor: dark ? "#dbe6ea" : "#17242a",
+        primaryColor: dark ? "#18222b" : "#eef4f6",
+        primaryBorderColor: dark ? "#3c4d59" : "#a7c0ca",
+        primaryTextColor: dark ? "#e3ebef" : "#0f1619",
+        secondaryColor: dark ? "#101820" : "#e3edf0",
+        tertiaryColor: dark ? "#0c1216" : "#f1f5f7",
+        clusterBkg: dark ? "#0f161c" : "#f6f9fa",
+        clusterBorder: dark ? "#2b3944" : "#c2d2d9",
+        titleColor: dark ? "#9fb2bb" : "#3f545d",
+        edgeLabelBackground: dark ? "#0c1216" : "#f1f5f7",
+        actorBkg: dark ? "#18222b" : "#eef4f6",
+        actorBorder: dark ? "#3c4d59" : "#a7c0ca",
+        actorTextColor: dark ? "#e3ebef" : "#0f1619",
+        actorLineColor: dark ? "#4a5c67" : "#93a9b2",
+        signalColor: dark ? "#9fb2bb" : "#41565f",
+        signalTextColor: dark ? "#c4d2d8" : "#26343a",
+        labelBoxBkgColor: dark ? "#18222b" : "#eef4f6",
+        labelBoxBorderColor: dark ? "#3c4d59" : "#a7c0ca",
+        labelTextColor: dark ? "#e3ebef" : "#0f1619",
+        loopTextColor: dark ? "#c4d2d8" : "#26343a",
+        noteBkgColor: dark ? "#1b2a17" : "#eef3e4",
+        noteBorderColor: dark ? "#3f5a32" : "#c1d2a2",
+        noteTextColor: dark ? "#dae7d2" : "#2b3a20"
+      }
+    };
+  }
+
+  function fallback(){
+    document.querySelectorAll(".holder").forEach(function(h){
+      var pre = document.createElement("pre");
+      pre.className = "mmfallback";
+      pre.textContent = decodeURIComponent(h.dataset.src);
+      h.innerHTML = "";
+      h.appendChild(pre);
+    });
+  }
+
+  var rendering = false;
+  function renderAll(){
+    if(rendering) return;
+    if(!window.mermaid){ fallback(); return; }
+    rendering = true;
+    var dark = activeTheme() === "dark";
+    try{
+      window.mermaid.initialize(mermaidConfig(dark));
+    }catch(e){ fallback(); rendering = false; return; }
+
+    var jobs = [];
+    document.querySelectorAll(".holder").forEach(function(h, i){
+      var src = decodeURIComponent(h.dataset.src);
+      h.innerHTML = "";
+      var id = "mmd-" + i + "-" + Date.now().toString(36);
+      jobs.push(
+        window.mermaid.render(id, src).then(function(out){
+          h.innerHTML = out.svg;
+          if(out.bindFunctions) out.bindFunctions(h);
+        }).catch(function(){
+          var pre = document.createElement("pre");
+          pre.className = "mmfallback";
+          pre.textContent = src;
+          h.innerHTML = "";
+          h.appendChild(pre);
+        })
+      );
+    });
+    Promise.all(jobs).then(function(){ rendering = false; });
+  }
+
+  var btn = document.getElementById("themeBtn");
+  btn.addEventListener("click", function(){
+    var next = activeTheme() === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    persist(next);
+    renderAll();
+  });
+
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function(){
+    if(!document.documentElement.getAttribute("data-theme")) renderAll();
+  });
+
+  // ---- reveal ----
+  if(matchMedia("(prefers-reduced-motion: no-preference)").matches && "IntersectionObserver" in window){
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(en){
+        if(en.isIntersecting){ en.target.classList.add("in"); io.unobserve(en.target); }
+      });
+    }, { rootMargin:"0px 0px -8% 0px" });
+    document.querySelectorAll("figure.plate").forEach(function(el){ io.observe(el); });
+  }else{
+    document.querySelectorAll("figure.plate").forEach(function(el){ el.classList.add("in"); });
+  }
+
+  if(document.readyState === "complete") renderAll();
+  else window.addEventListener("load", renderAll);
+})();
+</script>
+</body>
+</html>
