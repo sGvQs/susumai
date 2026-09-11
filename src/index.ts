@@ -12,8 +12,18 @@ import {
 } from './config.ts';
 import { checkHealth, warmup, chatStream } from './client.ts';
 import { History } from './history.ts';
-import { deviceLogin } from './auth.ts';
-import { deleteCredentials, loadCredentials, resolveAuthToken, saveCredentials } from './credentials.ts';
+import { clientId, deviceLogin } from './auth.ts';
+import {
+  buildGithubCredentials,
+  deleteCredentials,
+  loadCredentials,
+  refreshAuthTokenIfNeeded,
+  resolveAuthToken,
+  saveCredentials,
+  tryRefresh,
+  type Credentials,
+} from './credentials.ts';
+import { AuthError } from './errors.ts';
 
 const { stdin, stdout, stderr } = process;
 
@@ -55,7 +65,7 @@ const HELP = `susumai — セルフホスト DeepSeek R1 (Ollama) と話す CLI
   susumai config path             設定ファイルの絶対パスを表示
   susumai login                   GitHub アカウントでログイン（device flow）
   susumai logout                  保存した認証情報 (credentials.json) を削除
-  susumai auth status             ログイン状態と token の有無を表示
+  susumai auth status             ログイン状態・トークン有効期限・自動更新の状態を表示
 
 config set のオプション:
   --url <url>        トンネルの base URL（例 https://xxxx.trycloudflare.com）
@@ -139,6 +149,46 @@ export async function streamAnswer(
   }
 }
 
+/**
+ * 「1操作チェーン」内で refresh を1回試したかどうか。`checkHealth` / `warmup` / `streamAnswer`
+ * がそれぞれ `withAuthRetry` を持つため、401 が持続すると各段で forced refresh が走りうる。
+ * 単回使用の refresh_token を何度も焼かないよう、1チェーンあたり refresh は最大1回に絞る
+ * （事前更新 `refreshAuthTokenIfNeeded` の分は別カウント）。
+ *
+ * チェーンの境界:
+ * - 起動シーケンス（`checkHealth` → `warmup` → 初回 `runOneShot` / REPL 初回ターン）は1予算を共有。
+ * - REPL の2ターン目以降は各ターン開始時に {@link resetAuthRetryState} で予算を戻す
+ *   （別シェルでの `susumai login`・8時間跨ぎの再失効・別プロセスのローテートを次ターンで拾えるように）。
+ */
+let authRefreshAttempted = false;
+
+/** 操作チェーンの refresh 予算を戻す。REPL の各ターン開始時とテストから呼ぶ。 */
+export function resetAuthRetryState(): void {
+  authRefreshAttempted = false;
+}
+
+/**
+ * 事後更新（安全網）。`op()` が proxy の 401（{@link AuthError}）で落ちたら、refresh して
+ * **1回だけ**リトライする。旧フォーマット credentials・長時間 REPL の8時間跨ぎ・スリープ /
+ * 時計ずれ・proxy 正キャッシュ経由の一時通過後の失効・revoke を拾う。
+ *
+ * - `AuthError` 以外                       → 即再送出
+ * - 既にこのチェーンで refresh を試した     → 再試行せず元の `AuthError` を再送出
+ * - refresh 不能（refreshToken 無し / 失効） → 元の `AuthError` を再送出
+ * - リトライは1回だけ。2度目の例外は無条件伝播（`op()` は最大2回）。
+ */
+export async function withAuthRetry<T>(cfg: Config, op: () => Promise<T>): Promise<T> {
+  try {
+    return await op();
+  } catch (e) {
+    if (!(e instanceof AuthError)) throw e;
+    if (authRefreshAttempted) throw e;
+    authRefreshAttempted = true;
+    if (!(await tryRefresh(cfg))) throw e;
+    return await op();
+  }
+}
+
 async function runConfig(rest: string[], values: CliValues): Promise<void> {
   const sub = rest[0];
   if (sub === 'path') {
@@ -198,9 +248,9 @@ async function runConfig(rest: string[], values: CliValues): Promise<void> {
 /** `susumai login` — GitHub device flow を実行し credentials.json に保存する。 */
 async function runLogin(): Promise<void> {
   try {
-    const { token, login, id } = await deviceLogin();
+    const { login, id, grant } = await deviceLogin();
     saveCredentials({
-      github: { token, login, id, obtainedAt: new Date().toISOString() },
+      github: buildGithubCredentials(grant, { login, id }, new Date(), clientId()),
     });
     stdout.write(`ログインしました（@${login}）\n`);
   } catch (err) {
@@ -216,7 +266,54 @@ function runLogout(): void {
   );
 }
 
-/** `susumai auth status` — ログイン状態と config.json token の有無を表示する。 */
+/**
+ * `susumai auth status` の表示行を組み立てる純関数。
+ * - ログイン済み / 未ログイン
+ * - アクセストークンの有効期限（旧形式なら「不明」案内）
+ * - 自動更新（refresh token）の有無と失効日
+ * - config.json の token（マスク済み）の有無
+ */
+export function describeAuthStatus(
+  creds: Credentials | null,
+  configToken: string | null,
+  now: Date,
+): string[] {
+  const lines: string[] = [];
+  const gh = creds?.github;
+  if (gh?.token) {
+    lines.push(`ログイン済み: @${gh.login}（id ${gh.id}）`);
+    if (gh.expiresAt) {
+      const exp = Date.parse(gh.expiresAt);
+      if (Number.isNaN(exp)) {
+        lines.push('アクセストークン: 有効期限を解釈できません（日付が不正）');
+      } else if (exp <= now.getTime()) {
+        lines.push(`アクセストークン: ${gh.expiresAt}（失効済み）`);
+      } else {
+        const hours = Math.round((exp - now.getTime()) / 3_600_000);
+        lines.push(`アクセストークン: ${gh.expiresAt} まで（残り約${hours}時間）`);
+      }
+    } else {
+      lines.push('有効期限: 不明（旧形式・再ログインで自動更新が有効になります）');
+    }
+    if (gh.refreshToken) {
+      lines.push(
+        gh.refreshTokenExpiresAt
+          ? `自動更新: 有効（${gh.refreshTokenExpiresAt.slice(0, 10)} まで）`
+          : '自動更新: 有効',
+      );
+    } else {
+      lines.push('自動更新: なし（refresh token がありません）');
+    }
+  } else {
+    lines.push('ログインしていません（`susumai login` でログインできます）');
+  }
+  lines.push(
+    configToken ? `config.json の token: あり（${configToken}）` : 'config.json の token: なし',
+  );
+  return lines;
+}
+
+/** `susumai auth status` — ログイン状態・有効期限・自動更新・config.json token を表示する。 */
 function runAuthStatus(rest: string[]): void {
   const sub = rest[0];
   // `config` 経路（未知サブコマンドは exit 2）と揃える。`susumai auth` 単独は status 扱いで許容。
@@ -227,16 +324,9 @@ function runAuthStatus(rest: string[]): void {
   const creds = loadCredentials();
   const masked = maskedConfig(loadConfig());
   const configToken = typeof masked.token === 'string' ? masked.token : null;
-  if (creds?.github?.token) {
-    stdout.write(`ログイン済み: @${creds.github.login}（id ${creds.github.id}）\n`);
-  } else {
-    stdout.write('ログインしていません（`susumai login` でログインできます）\n');
+  for (const line of describeAuthStatus(creds, configToken, new Date())) {
+    stdout.write(line + '\n');
   }
-  stdout.write(
-    configToken
-      ? `config.json の token: あり（${configToken}）\n`
-      : 'config.json の token: なし\n',
-  );
 }
 
 async function runOneShot(cfg: Config, prompt: string): Promise<void> {
@@ -245,7 +335,7 @@ async function runOneShot(cfg: Config, prompt: string): Promise<void> {
   const onSigint = () => ac.abort();
   process.on('SIGINT', onSigint);
   try {
-    await streamAnswer(cfg, history, prompt, ac.signal);
+    await withAuthRetry(cfg, () => streamAnswer(cfg, history, prompt, ac.signal));
   } catch (err) {
     fail(err);
   } finally {
@@ -267,6 +357,8 @@ async function runRepl(cfg: Config): Promise<void> {
 
   stdout.write('susumai REPL — .exit で終了。生成中の Ctrl-C で中断。\n');
 
+  // 初回ターンは起動シーケンス（checkHealth → warmup）と refresh 予算を共有する。
+  let firstTurn = true;
   for (;;) {
     let line: string;
     try {
@@ -278,9 +370,14 @@ async function runRepl(cfg: Config): Promise<void> {
     if (!q) continue;
     if (q === '.exit') break;
 
-    generating = new AbortController();
+    // 2ターン目以降は各ターンが独立した refresh 予算を持つ（長時間セッションの回復のため）。
+    if (!firstTurn) resetAuthRetryState();
+    firstTurn = false;
+
+    const ac = new AbortController();
+    generating = ac;
     try {
-      await streamAnswer(cfg, history, q, generating.signal);
+      await withAuthRetry(cfg, () => streamAnswer(cfg, history, q, ac.signal));
     } catch (err) {
       stderr.write('\n' + errMessage(err) + '\n');
     } finally {
@@ -346,12 +443,15 @@ async function main(): Promise<void> {
   // credentials.json に GitHub トークンがあれば cfg.token を上書きする（1回だけ・
   // assertUrl / checkHealth より前）。config サブコマンド経路は通らない。
   resolveAuthToken(cfg);
+  // 事前更新（主）: access token の期限が近ければ、ここで refresh してから進む。
+  // 期限が遠ければネットワークに触れない（shouldRefresh のゲート）。
+  await refreshAuthTokenIfNeeded(cfg);
   if (values['no-stream']) cfg.stream = false;
 
   try {
     assertUrl(cfg);
     stderr.write('接続を確認中…\n');
-    await checkHealth(cfg);
+    await withAuthRetry(cfg, () => checkHealth(cfg));
   } catch (err) {
     fail(err);
   }
@@ -366,7 +466,7 @@ async function main(): Promise<void> {
 
   try {
     stderr.write('モデル読み込み中…\n');
-    await warmup(cfg);
+    await withAuthRetry(cfg, () => warmup(cfg));
   } catch (err) {
     fail(err);
   }

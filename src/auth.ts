@@ -5,9 +5,18 @@
  * 入れない（zero-dep 方針）。client_id は publish 時に tsup の define で `__CLIENT_ID__` に
  * 焼き込む（実行時 env なしで `susumai login` が動く）。実行時 env override は clientId() が優先。
  *
- * 純関数（parseDeviceCodeResponse / classifyPollResponse / nextInterval）は
- * test/auth.test.mjs から named import される。deviceLogin だけが副作用を持つ。
+ * 純関数（parseDeviceCodeResponse / classifyPollResponse / nextInterval /
+ * toTokenGrant / classifyRefreshResponse）は test/auth.test.mjs から named import される。
+ * deviceLogin / refreshAccessToken が副作用を持つ。
  */
+
+import { describeErr, RefreshExpiredError } from './errors.ts';
+
+/**
+ * refresh の HTTP タイムアウト。`credentials.ts` の LOCK_STALE_MS より明確に短くする
+ * （遅延した refresh を stale 奪取で二重に投げ、単回使用 refresh_token を焼く事故を防ぐ）。
+ */
+export const REFRESH_FETCH_TIMEOUT_MS = 10_000;
 
 /** この repo の OAuth App の client_id。秘密ではない（公開情報）。 */
 const DEFAULT_CLIENT_ID = 'Ov23liuaEuBGcxLCPA3T';
@@ -67,17 +76,45 @@ export function parseDeviceCodeResponse(json: unknown): DeviceCode {
   return { deviceCode: dc, userCode: uc, verificationUri: vu, interval, expiresIn };
 }
 
-/** ポーリング応答の分類。`{ token }` は成功、それ以外は継続 / 中断のシグナル。 */
+/**
+ * device flow / refresh 双方の「トークン発行」応答を正規化した形。
+ * GitHub は refresh token を返さない設定（Expire user authorization tokens OFF）もあるので
+ * token 以外はすべて optional。無ければ従来どおり `{ token }` だけになる。
+ */
+export interface TokenGrant {
+  token: string;
+  refreshToken?: string;
+  /** access token の寿命（秒）。 */
+  expiresIn?: number;
+  /** refresh token の寿命（秒）。 */
+  refreshTokenExpiresIn?: number;
+}
+
+/**
+ * `access_token` を含む応答オブジェクトを {@link TokenGrant} にする（内部 DRY）。
+ * `refresh_token` / `expires_in` / `refresh_token_expires_in` が無ければ省略する。
+ */
+export function toTokenGrant(o: Record<string, unknown>): TokenGrant {
+  const grant: TokenGrant = { token: o.access_token as string };
+  if (typeof o.refresh_token === 'string' && o.refresh_token) grant.refreshToken = o.refresh_token;
+  if (typeof o.expires_in === 'number' && o.expires_in > 0) grant.expiresIn = o.expires_in;
+  if (typeof o.refresh_token_expires_in === 'number' && o.refresh_token_expires_in > 0) {
+    grant.refreshTokenExpiresIn = o.refresh_token_expires_in;
+  }
+  return grant;
+}
+
+/** ポーリング応答の分類。{@link TokenGrant} は成功、それ以外は継続 / 中断のシグナル。 */
 export type PollClassification =
   | 'pending'
   | 'slow_down'
   | 'expired'
   | 'denied'
-  | { token: string };
+  | TokenGrant;
 
 /**
  * `POST /login/oauth/access_token` のレスポンス JSON を分類する。
- * - `access_token` あり              → `{ token }`
+ * - `access_token` あり              → {@link TokenGrant}（refresh_token 等があれば同梱）
  * - `error: authorization_pending`   → `'pending'`（継続）
  * - `error: slow_down`               → `'slow_down'`（interval を +5s して継続）
  * - `error: expired_token`           → `'expired'`（明示エラーで終了）
@@ -90,7 +127,7 @@ export function classifyPollResponse(json: unknown): PollClassification {
   }
   const o = json as Record<string, unknown>;
   if (typeof o.access_token === 'string' && o.access_token) {
-    return { token: o.access_token };
+    return toTokenGrant(o);
   }
   switch (o.error) {
     case 'authorization_pending':
@@ -118,6 +155,33 @@ export function nextInterval(current: number, slowDown: boolean): number {
   return slowDown ? current + 5 : current;
 }
 
+/**
+ * `POST /login/oauth/access_token`（`grant_type=refresh_token`）のレスポンス JSON を分類する。
+ * - `access_token` あり                         → {@link TokenGrant}（新 refresh_token 同梱）
+ * - `error: bad_refresh_token` / `invalid_grant` / `unauthorized`
+ *                                               → `'invalid_grant'`（refresh token 失効。要再ログイン）
+ * - それ以外の予期しない応答                    → throw
+ */
+export function classifyRefreshResponse(json: unknown): TokenGrant | 'invalid_grant' {
+  if (!json || typeof json !== 'object') {
+    throw new Error('GitHub の token 更新応答を解釈できませんでした');
+  }
+  const o = json as Record<string, unknown>;
+  if (typeof o.access_token === 'string' && o.access_token) {
+    return toTokenGrant(o);
+  }
+  if (o.error === 'bad_refresh_token' || o.error === 'invalid_grant' || o.error === 'unauthorized') {
+    return 'invalid_grant';
+  }
+  const detail =
+    typeof o.error_description === 'string'
+      ? o.error_description
+      : typeof o.error === 'string'
+        ? o.error
+        : 'unknown';
+  throw new Error(`GitHub のトークン更新で予期しない応答: ${detail}`);
+}
+
 /** 非対話 / CI 環境か（device flow はブラウザ操作が要るのでここでは実行できない）。 */
 export function isNonInteractive(): boolean {
   if (process.env.CI) return true;
@@ -129,9 +193,10 @@ export function isNonInteractive(): boolean {
 // ============================================================================
 
 export interface DeviceLoginResult {
-  token: string;
   login: string;
   id: number;
+  /** access token ＋（発行された場合）refresh token / 有効期限。 */
+  grant: TokenGrant;
 }
 
 export interface DeviceLoginOptions {
@@ -235,7 +300,7 @@ export async function deviceLogin(opts: DeviceLoginOptions = {}): Promise<Device
     const verdict = classifyPollResponse(pollJson);
     if (typeof verdict === 'object') {
       const user = await fetchGitHubUser(verdict.token);
-      return { token: verdict.token, login: user.login, id: user.id };
+      return { login: user.login, id: user.id, grant: verdict };
     }
     if (verdict === 'pending') continue;
     if (verdict === 'slow_down') {
@@ -250,6 +315,59 @@ export async function deviceLogin(opts: DeviceLoginOptions = {}): Promise<Device
     // denied
     throw new Error('GitHub 側で認証が拒否されました（access_denied）。');
   }
+}
+
+/**
+ * refresh token を使って access token を更新する（副作用: HTTP）。
+ * `POST github.com/login/oauth/access_token`、body は `client_id` / `grant_type=refresh_token`
+ * / `refresh_token`。GitHub の refresh token は単回使用なので、成功応答には新しい
+ * refresh_token が必ず入る（呼び出し側が使用前に永続化する責任を持つ）。
+ *
+ * - `'invalid_grant'`（refresh token 失効） → {@link RefreshExpiredError}
+ * - ネットワーク断・予期しない応答          → 通常の Error（呼び出し側で非致命に扱う）
+ */
+export async function refreshAccessToken(
+  refreshToken: string,
+  clientIdOverride?: string,
+  timeoutMs: number = REFRESH_FETCH_TIMEOUT_MS,
+): Promise<TokenGrant> {
+  const id = clientIdOverride || clientId();
+  let res: Response;
+  try {
+    res = await fetch(ACCESS_TOKEN_URL, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': UA,
+      },
+      body: new URLSearchParams({
+        client_id: id,
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+      }).toString(),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    throw new Error(`GitHub (${ACCESS_TOKEN_URL}) に到達できません: ${describeErr(err)}`);
+  }
+  const text = await res.text().catch(() => '');
+  let json: unknown = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    /* 非 JSON */
+  }
+  if (!res.ok && (json === null || typeof json !== 'object')) {
+    throw new Error(
+      `GitHub のトークン更新に失敗しました（HTTP ${res.status}）。時間をおいて再実行してください。`,
+    );
+  }
+  const verdict = classifyRefreshResponse(json);
+  if (verdict === 'invalid_grant') {
+    throw new RefreshExpiredError('GitHub の refresh token が失効しています（再ログインが必要です）');
+  }
+  return verdict;
 }
 
 async function fetchGitHubUser(token: string): Promise<{ login: string; id: number }> {
@@ -273,12 +391,4 @@ async function fetchGitHubUser(token: string): Promise<{ login: string; id: numb
     throw new Error('GitHub ユーザー情報の応答を解釈できませんでした');
   }
   return { login: j.login, id: j.id };
-}
-
-function describeErr(err: unknown): string {
-  if (err && typeof err === 'object') {
-    const e = err as { cause?: { code?: string }; code?: string; message?: string };
-    return String(e.cause?.code ?? e.code ?? e.message ?? err);
-  }
-  return String(err);
 }

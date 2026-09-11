@@ -1,5 +1,6 @@
 import type { Config } from './config.ts';
 import { StreamInterpreter, type Fragment } from './parser.ts';
+import { AUTH_HINT, AuthError } from './errors.ts';
 
 export function buildHeaders(cfg: Config): Record<string, string> {
   return {
@@ -79,9 +80,7 @@ export async function checkHealth(cfg: Config, opts: { timeoutMs?: number } = {}
   }
   if (resp.status === 401) {
     void resp.body?.cancel().catch(() => {}); // 未消費レスポンスボディを解放
-    throw new Error(
-      '認証に失敗しました (401)。`susumai login` でログインするか、classic PAT を `susumai config set --token ghp_...` で設定してください',
-    );
+    throw new AuthError(`認証に失敗しました (401)。${AUTH_HINT}`);
   }
   if (!resp.ok) {
     void resp.body?.cancel().catch(() => {}); // 未消費レスポンスボディを解放
@@ -135,6 +134,10 @@ export async function warmup(cfg: Config, opts: { timeoutMs?: number } = {}): Pr
   if (resp.status === 524) {
     void resp.body?.cancel().catch(() => {}); // 未消費レスポンスボディを解放
     throw new Error('トンネルの応答開始制限 (524)。サーバ側で先にモデルを温めてください');
+  }
+  if (resp.status === 401) {
+    void resp.body?.cancel().catch(() => {}); // 未消費レスポンスボディを解放
+    throw new AuthError(`認証に失敗しました (401)。${AUTH_HINT}`);
   }
   if (!resp.ok) {
     void resp.body?.cancel().catch(() => {}); // 未消費レスポンスボディを解放
@@ -215,10 +218,7 @@ async function* rawChatStream(
   if (!resp.ok) {
     void resp.body?.cancel().catch(() => {}); // 未消費レスポンスボディを解放
     cleanup();
-    if (resp.status === 401)
-      throw new Error(
-        '認証に失敗しました (401)。`susumai login` でログインするか、classic PAT を `susumai config set --token ghp_...` で設定してください',
-      );
+    if (resp.status === 401) throw new AuthError(`認証に失敗しました (401)。${AUTH_HINT}`);
     if (resp.status === 404 || resp.status === 503) {
       throw new Error(`モデルが未ロードです (HTTP ${resp.status})。サーバ側でモデルを温めてください`);
     }
