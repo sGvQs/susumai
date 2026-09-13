@@ -4,8 +4,11 @@
 **コミットするのは placeholder 入りテンプレートだけ。** 実 home パスで埋めた
 `*.plist` と本番ログは `.gitignore` 済み。
 
-インフラ操作（`cloudflared tunnel create` / `route dns` / `service install` /
-`launchctl`）は後藤さん本人が行う。ここにあるのはコミット可能なファイルのみ。
+インフラ操作（`cloudflared tunnel create` / `route dns` / `launchctl`）は
+後藤さん本人が行う。ここにあるのはコミット可能なファイルのみ。
+（`cloudflared service install` は tunnel 作成直後の一時的な動作確認にのみ
+使うことがあり、常駐には使わない。実際の常駐は下記の通り gui LaunchAgent
+`com.susumai.cloudflared` として稼働している。）
 
 ## ファイル
 
@@ -13,7 +16,7 @@
 | :--- | :--- |
 | `proxy-prod.mjs` | launchd から起動する本番 proxy のシム。`SUSUMAI_PROD=1` を立てて単一ソース `../rehearsal/proxy.mjs` の `startServer()` を dynamic import で呼ぶだけ。`SUSUMAI_PROXY_LOG` 未設定なら起動拒否。 |
 | `com.susumai.proxy.plist.template` | 本番 proxy の LaunchAgent テンプレート。 |
-| `com.susumai.cloudflared.plist.template` | named tunnel `susumai-prod` の常駐テンプレート（参照用。実常駐は `cloudflared service install` が自前で作る）。 |
+| `com.susumai.cloudflared.plist.template` | named tunnel `susumai-prod` の常駐テンプレート。実際にこのテンプレートから生成した gui LaunchAgent `com.susumai.cloudflared` として常駐している（`cloudflared service install` は使っていない）。 |
 
 ## placeholder 一覧
 

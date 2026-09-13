@@ -11,6 +11,12 @@
  *   - 詰まったら(ログの読み方)     → RUNBOOK §7
  *   - URL の揮発性                → SPIKE_RESULTS.md（毎回採取し直す）
  *
+ * cloudflared quick tunnel は必ず --config rehearsal/cloudflared.isolated.yml 付きで起動する
+ * （startCloudflared()）。省略すると cloudflared が既定の ~/.cloudflared/config.yml（本番 named
+ * tunnel 用。ingress catch-all が quick tunnel のランダムホスト名を http_status:404 で弾く）を
+ * 拾ってしまい、quick tunnel が常に 404 を返し続ける（2026-09-13 実機で確認済み。エッジ伝播待ち
+ * ではなく設定ファイル衝突）。本番 config.yml 自体は一切変更しない。
+ *
  * 使い方:
  *   node rehearsal/rehearse.mjs [--start-ollama]   フル実行（フォアグラウンド常駐）
  *   node rehearsal/rehearse.mjs teardown [--all]   明示撤収
@@ -39,6 +45,11 @@ const REPO_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const REHEARSAL_DIR = path.join(REPO_ROOT, 'rehearsal');
 const XDG_DIR = path.join(REHEARSAL_DIR, '.xdg'); // 隔離 config の XDG_CONFIG_HOME（絶対パス）
 const ISOLATED_CONFIG = path.join(XDG_DIR, 'susumai', 'config.json');
+// cloudflared quick tunnel 専用の隔離 config（絶対パス）。--config 未指定だと cloudflared が
+// 既定の ~/.cloudflared/config.yml（本番 named tunnel 用。ingress catch-all が quick tunnel の
+// ランダムホスト名を 404 で弾く）を読み込んでしまうため、必ずこのファイルを明示指定する
+// （詳細は cloudflared.isolated.yml 冒頭コメント、使用箇所は startCloudflared() 参照）。
+const CLOUDFLARED_ISOLATED_CONFIG = path.join(REHEARSAL_DIR, 'cloudflared.isolated.yml');
 const PROXY_SCRIPT = path.join(REHEARSAL_DIR, 'proxy.mjs');
 const PROXY_LOG = path.join(REHEARSAL_DIR, 'proxy.log');
 const DIST_INDEX = path.join(REPO_ROOT, 'dist', 'index.js');
@@ -124,6 +135,36 @@ export function tunnelPollDelayMs(elapsedMs) {
 /** 待っても直らない＝リトライを打ち切って HALT すべきトンネル応答か。 */
 export function isTunnelFatalStatus(status) {
   return status === 401;
+}
+
+/**
+ * トンネルプローブ1回分を SUCCESS/FATAL/PENDING の3値に分類する（HTTP は呼ばない）。
+ * 401 判定は isTunnelFatalStatus をそのまま呼ぶ（ここで再実装しない。将来ドリフト防止）。
+ * 5xx（502/503/504等）は特別扱いしない: cloudflared quick tunnel は伝播未完了時にも 5xx を
+ * 返し得るため「5xx=エッジ伝播成立」と断定できない。分類はこの3値のみ。
+ */
+export function classifyTunnelProbe({ status, shaped }) {
+  if (shaped) return 'SUCCESS';
+  if (isTunnelFatalStatus(status)) return 'FATAL';
+  return 'PENDING';
+}
+
+/**
+ * PENDING が STALL_MS 以上続いたら cloudflared を再起動すべきか（再起動上限・再起動可否も考慮）。
+ * canAutoRestart は「既存 cloudflared を再利用中（given）でない」ことのゲート。
+ */
+export function shouldRestartCloudflared({
+  classification,
+  attemptElapsedMs,
+  stallMs,
+  restartCount,
+  maxRestarts,
+  canAutoRestart,
+}) {
+  if (classification !== 'PENDING') return false;
+  if (!canAutoRestart) return false;
+  if (!Number.isFinite(attemptElapsedMs) || attemptElapsedMs < stallMs) return false;
+  return restartCount < maxRestarts;
 }
 
 /** この run が書いた使い捨て cloudflared ログのファイル名か（`cloudflared.<pid>.<ts>.log`）。 */
@@ -284,6 +325,19 @@ export function isPort8787TunnelCmd(cmd) {
   return /(?:localhost|127\.0\.0\.1):8787(?:$|[^0-9])/.test(cmd);
 }
 
+/**
+ * given（再利用中）cloudflared を kill する直前・SIGKILL 直前に呼ぶ身元再確認。
+ * isPort8787TunnelCmd をそのまま呼ぶ（再実装しない）。classifyProxyListener 等と同じ
+ * 「純粋判定＋呼び出し側で halt」パターン。
+ */
+export function classifyGivenCloudflaredIdentity(cmd) {
+  const c = (cmd || '').trim();
+  if (!c) return { ok: false, reason: 'ps がコマンドラインを返しません（プロセス消失 or 権限不足）' };
+  if (!c.includes('cloudflared')) return { ok: false, reason: `cloudflared ではありません（${c}）` };
+  if (!isPort8787TunnelCmd(c)) return { ok: false, reason: `:8787 向けトンネルではありません（${c}）` };
+  return { ok: true, reason: `given cloudflared と一致（${c}）` };
+}
+
 /** /api/tags 応答（パース済み JSON）に want モデルが含まれるか。 */
 export function tagsHasModel(json, want) {
   const models = json && Array.isArray(json.models) ? json.models : [];
@@ -324,6 +378,8 @@ const state = {
   toreDown: false,
   // トンネル伝播待ち HALT のときだけ true: 起動した子と隔離 .xdg を残して次回再利用させる。
   keepStartedProcesses: false,
+  // given cloudflared の kill 試行中〜成功確定までの間だけ非 null（TOCTOU・中断時の生死不明報告用）。
+  restartingCloudflaredPid: null,
 };
 
 /** 自分が spawn した子だけをメモリ配列で保持（永続台帳なし）。 */
@@ -438,7 +494,7 @@ function isolatedToken() {
 function cleanXdgLogs() {
   try {
     for (const f of fs.readdirSync(XDG_DIR)) {
-      if (f.endsWith('.log')) fs.rmSync(path.join(XDG_DIR, f), { force: true });
+      if (f.endsWith('.log') || f.endsWith('.jsonl')) fs.rmSync(path.join(XDG_DIR, f), { force: true });
     }
   } catch {
     /* .xdg 無し */
@@ -491,6 +547,84 @@ function spawnTracked(name, cmd, args, opts = {}) {
 }
 
 /**
+ * 子プロセスの終了を最大 timeoutMs 待ち、まだ生きていれば SIGKILL する。
+ * SIGTERM の送信自体は呼び出し側の責務（このヘルパーは「送った後の待ち」だけを担う）。
+ * autoTeardown()（起動済み子の一括撤収）と restartCloudflared()（cloudflared 単体の再起動）で共有。
+ */
+async function waitExitOrKill(child, timeoutMs) {
+  await sleep(timeoutMs);
+  if (child.exitCode == null && child.signalCode == null) {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/**
+ * given（自分が spawn していない）cloudflared の PID を最大 timeoutMs ポーリングで待ち、
+ * まだ生きていれば SIGKILL する。waitExitOrKill（ChildProcess ハンドル用）とは統合しない:
+ * given は他プロセスの生 PID しか持たず Node 側に exit イベントが来ないため。
+ *
+ * TOCTOU 対策: SIGTERM 後の待機がタイムアウトしてもまだ生きていた場合、SIGKILL を送る
+ * 直前にもう一度 classifyGivenCloudflaredIdentity で身元を再確認する（待機中に OS が同じ
+ * PID を無関係プロセスへ再割当している可能性があるため）。身元確認から SIGKILL 実行までの
+ * 間は await を挟まない同期区間にする（イベントループに制御を譲らない）。
+ */
+async function waitPidExitOrKill(pid, timeoutMs) {
+  const pollMs = 100;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!psCommand(pid)) return { ok: true };
+    if (Date.now() >= deadline) break;
+    await sleep(pollMs);
+  }
+
+  const cmdNow = psCommand(pid);
+  if (!cmdNow) return { ok: true };
+
+  const ident = classifyGivenCloudflaredIdentity(cmdNow); // ← SIGKILL直前の再確認
+  if (!ident.ok) {
+    return {
+      ok: false,
+      reason: `SIGKILL直前の身元再確認に失敗（${ident.reason}）。SIGTERM後の待機中にPIDが別プロセスへ再割当された可能性があるため、SIGKILLを中止しhaltします`,
+    };
+  }
+  try {
+    process.kill(pid, 'SIGKILL'); // ← ident判定からawaitを挟まず即実行
+  } catch (e) {
+    return { ok: false, reason: `SIGKILLの送信に失敗: ${e.message}` };
+  }
+
+  // SIGKILL後の生存確認も単発でなくポーリング化（負荷時の誤halt防止）
+  for (let i = 0; i < 5; i++) {
+    await sleep(100);
+    if (!psCommand(pid)) return { ok: true };
+  }
+  return { ok: false, reason: `PID ${pid} は SIGKILL 後 500ms 経っても生存しています` };
+}
+
+/**
+ * given cloudflared に SIGTERM を送って停止させる（SIGTERM 送信前に身元確認、タイムアウト後は
+ * waitPidExitOrKill が SIGKILL 直前にも再確認する）。restartCloudflared の given 経路専用。
+ */
+async function killGivenCloudflared(pid) {
+  const cmdBefore = psCommand(pid);
+  const before = classifyGivenCloudflaredIdentity(cmdBefore); // SIGTERM送信前の身元確認
+  if (!before.ok) {
+    return { ok: false, reason: `SIGTERM送信前の身元確認に失敗: ${before.reason}` };
+  }
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (e) {
+    return { ok: false, reason: `SIGTERMの送信に失敗: ${e.message}` };
+  }
+  warn(`  cloudflared PID ${pid} に SIGTERM (${cmdBefore})`);
+  return waitPidExitOrKill(pid, 2000);
+}
+
+/**
  * autoTeardown — 自動経路（Enter / Ctrl+C / エラー / 正常完了 / 24h 無活動）共通。
  * メモリ保持 PID（自分の起動分）だけを kill する。pkill は呼ばない。
  * 隔離 .xdg/ の削除は「この run が proxy を新規起動した場合のみ」。
@@ -524,16 +658,7 @@ async function autoTeardown() {
     }
   }
   if (alive.length) {
-    await sleep(2000);
-    for (const c of alive) {
-      if (c.child.exitCode == null && c.child.signalCode == null) {
-        try {
-          c.child.kill('SIGKILL');
-        } catch {
-          /* already gone */
-        }
-      }
-    }
+    await Promise.all(alive.map((c) => waitExitOrKill(c.child, 2000)));
   }
 
   if (state.startedProxy) {
@@ -555,7 +680,12 @@ async function autoTeardown() {
   if (!state.startedProxy && state.reusedProxyPid) {
     survivors.push(`proxy PID ${state.reusedProxyPid}`);
   }
-  if (!state.startedCloudflared && state.reusedCloudflaredPid) {
+  if (state.restartingCloudflaredPid) {
+    survivors.push(
+      `cloudflared PID ${state.restartingCloudflaredPid}（乗っ取り試行中に処理が止まりました。生死不明です。` +
+        `\`ps -p ${state.restartingCloudflaredPid} -o command=\` で手動確認してください）`,
+    );
+  } else if (!state.startedCloudflared && state.reusedCloudflaredPid) {
     survivors.push(`cloudflared PID ${state.reusedCloudflaredPid}`);
   }
   if (survivors.length) {
@@ -698,6 +828,14 @@ async function resolveCloudflared() {
     log('  :8787 トンネルの既存 cloudflared なし → 新規起動します');
     return { action: 'start' };
   }
+  if (existing.length > 1) {
+    const list = existing.map((x) => `PID ${x.pid} (${x.cmd})`).join(', ');
+    halt(
+      `:8787 トンネルの cloudflared が複数検出されました: ${list}\n` +
+        '  自動再起動（乗っ取り）は一意に特定できる場合のみ対応しています。\n' +
+        '  `npm run rehearse:teardown -- --all` で全て停止してから再実行してください。',
+    );
+  }
   const list = existing.map((x) => `PID ${x.pid} (${x.cmd})`).join(', ');
   warn(`  既存の :8787 cloudflared を検出: ${list}`);
 
@@ -835,8 +973,21 @@ async function waitProxyHealthy(child, token) {
   halt('proxy は listening ですが :8787 が 200 を返しません（トークン / 上流 Ollama を確認）');
 }
 
+/**
+ * --config で隔離 config（cloudflared.isolated.yml）を明示指定する。省略すると cloudflared が
+ * 既定パス ~/.cloudflared/config.yml（本番 named tunnel 用。ingress catch-all あり）を勝手に
+ * 読み込み、quick tunnel のランダムホスト名がその catch-all（http_status:404）に一致して
+ * 常に 404 を返し続ける（2026-09-13 実機で確認済みの衝突。伝播待ちではない）。
+ * restartCloudflared() 経由の再起動もこの関数を通るので同じ隔離 config になる。
+ */
 function startCloudflared() {
-  return spawnToLogFile('cloudflared', 'cloudflared', ['tunnel', '--url', TUNNEL_TARGET]);
+  return spawnToLogFile('cloudflared', 'cloudflared', [
+    'tunnel',
+    '--url',
+    TUNNEL_TARGET,
+    '--config',
+    CLOUDFLARED_ISOLATED_CONFIG,
+  ]);
 }
 
 function captureTunnelUrl(child, timeoutMs = 30_000) {
@@ -913,38 +1064,136 @@ function probeTagsViaIp(baseUrl, host, ip, headers, timeoutMs) {
   });
 }
 
+/** トンネル検証の1プローブごとの診断ログ（.xdg 直下にフラット・jsonl。cleanXdgLogs が掃除する）。 */
+const TUNNEL_ATTEMPTS_LOG = path.join(XDG_DIR, `tunnel-attempts.${process.pid}.${Date.now()}.jsonl`);
+function appendTunnelAttemptLog(entry) {
+  try {
+    fs.appendFileSync(TUNNEL_ATTEMPTS_LOG, JSON.stringify(entry) + '\n');
+  } catch {
+    /* 診断用・失敗は無視 */
+  }
+}
+
+/**
+ * 詰まり検知後の再起動シーケンス: 旧 cloudflared を kill → 新規 spawn → URL 採取 →
+ * `config set --url`。cfHandle.child を新しい ChildProcess で上書きする（呼び出し元と共有）。
+ * proxy・トークンには一切触れない（再起動で変わるのは cloudflared＝トンネルだけ）。
+ * 旧 ChildProcess を children 配列から明示的に取り除く必要はない（kill されて
+ * exitCode/signalCode が付けば既存の alive 判定で自然に除外される）。
+ */
+async function restartCloudflared(cfHandle) {
+  if (cfHandle.child) {
+    // owned経路（既存のまま、変更不要）
+    warn('  詰まり検知: cloudflared（起動済み）を再起動します');
+    try {
+      cfHandle.child.kill('SIGTERM');
+    } catch {
+      /* already gone */
+    }
+    await waitExitOrKill(cfHandle.child, 2000);
+    const newChild = startCloudflared();
+    cfHandle.child = newChild;
+    const newUrl = await captureTunnelUrl(newChild);
+    const set = runSusumai(['config', 'set', '--url', newUrl]);
+    if (set.status !== 0) halt(`再起動後の config set --url に失敗しました\n${set.stderr}`);
+    log(`  再起動完了: 新URL ${newUrl}`);
+    return newUrl;
+  }
+
+  // given経路: まだhijackしていない。cfHandle.givenPidにraw PIDを持つ。
+  const pid = cfHandle.givenPid;
+  warn(`  詰まり検知: 再利用中の cloudflared (PID ${pid}) を停止して自前起動に乗っ取ります`);
+
+  state.restartingCloudflaredPid = pid; // kill試行開始を示す。成功確定までクリアしない
+
+  const result = await killGivenCloudflared(pid);
+  if (!result.ok) {
+    // state.restartingCloudflaredPid はクリアしない（autoTeardownのsurvivors報告に伝播させる）
+    halt(`given cloudflared (PID ${pid}) の停止に失敗しました: ${result.reason}`);
+  }
+
+  // ここに到達した時点で対象PIDの消滅は確認済み。ここから先を同一tick内でまとめて更新する。
+  state.restartingCloudflaredPid = null;
+  state.reusedCloudflaredPid = null;
+  state.startedCloudflared = true; // 以後は「自分が起動した」扱いに切り替える
+
+  const newChild = startCloudflared(); // spawnTracked経由でchildren[]に登録され、以後は通常の子として追跡される
+  cfHandle.child = newChild;
+  cfHandle.hijackedFromGiven = true; // verifyTunnelの定期ログで参照する
+  log(`  given cloudflared (PID ${pid}) → 乗っ取り完了。新PID ${newChild.pid} を以後「起動済み」として追跡`);
+
+  const newUrl = await captureTunnelUrl(newChild);
+  const set = runSusumai(['config', 'set', '--url', newUrl]);
+  if (set.status !== 0) halt(`再起動後の config set --url に失敗しました\n${set.stderr}`);
+  log(`  再起動完了: 新URL ${newUrl}`);
+  return newUrl;
+}
+
 /**
  * トンネル越し GET /api/tags が 200＋期待形状になるまで待つ。
  *
  * readiness ポーリングは c-ares（dns.promises.Resolver、設定済みネームサーバに直問い合わせ）で行う。
  * Node の fetch は getaddrinfo 経由なので、macOS の mDNSResponder が quick tunnel 作成直後の
- * NXDOMAIN を数分ネガティブキャッシュすると、レコードが実在しても 180s 失敗し続けた
+ * NXDOMAIN を数分ネガティブキャッシュすると、レコードが実在しても失敗し続けた
  * （HALT 後に dscacheutil -flushcache が必要だった）。c-ares はそのキャッシュを飛ばす。
  * HTTP プローブは resolve4 で得た IP を直に叩く（probeTagsViaIp。SNI / Host は host 名のまま）。
  *
- * cloudflared quick tunnel はエッジに伝播するまで初回リクエストが通らない。
- * 2026-09-04 の実機テストで、30s 窓では初回 200 に届かず Phase 3b が2連続 HALT した。
- * 上限は既定 180s（env REHEARSE_TUNNEL_WAIT_MS で上書き可）。間隔は tunnelPollDelayMs のバックオフ。
- * システム servers で REHEARSE_DNS_FALLBACK_MS（既定 20s）引けなければ public DNS へ1回フォールバック。
- * 1 イテレーションのブロックは resolve4（最大 ~6s）＋ フォールバック再 resolve（~6s）＋ IP ごと
- * 最大 5s プローブ ＋ sleep 最大 5s。SIGINT はこの範囲で効く（3分ブロックにはならない）。
- * 上限（budgetMs）の超過は DNS 後・IP ループ内でも都度チェックしてオーバーシュートを抑える。
+ * cloudflared quick tunnel は DNS 解決後もエッジ全体への伝播待ちで応答が返らないことがある。
+ * 2026-09-04 の実機で DNS 解決自体は数秒で終わったのに、その後 170s 404 が続いて旧上限 180s
+ * で HALT した実測が1件ある。cloudflared 自身のエッジ接続確立の問題ではなく Cloudflare 側の
+ * 内部的なエッジ全体への伝播待ちと見て、詰まりを検知したら cloudflared 自体を再起動して新しい
+ * 接続を張り直す（再起動しても proxy・トークンは変わらない。変わるのは cloudflared＝トンネル
+ * だけ）。応答分類は classifyTunnelProbe が SUCCESS/FATAL/PENDING の3値のみで行う。5xx は
+ * cloudflared quick tunnel が伝播未完了時にも返し得るため特別扱いしない（「5xx=伝播成立」と
+ * 断定しない）。
+ *
+ * budgetMs（既定 240,000ms）・STALL_MS（既定 50,000ms）・MAX_RESTARTS（既定 2）はいずれも上記
+ * 1サンプル（170秒404が続いた実測）根拠の暫定初期値。TUNNEL_ATTEMPTS_LOG（.xdg 直下の診断用
+ * jsonl）で今後実測を積み重ねて調整する前提。env で上書き可能
+ * （REHEARSE_TUNNEL_WAIT_MS / REHEARSE_TUNNEL_STALL_MS / REHEARSE_TUNNEL_MAX_RESTARTS）。
+ *
+ * タイマーは2本、単一の時計に統一する（DNS 解決時間を別立てで加算しない）:
+ * - overallStart: この呼び出し全体の開始時刻。再起動しても不変。budgetMs の基準。
+ * - attemptStart: 現在の cloudflared インスタンスでの検証開始時刻。再起動のたびにリセット。
+ *   STALL_MS 判定・tunnelPollDelayMs のバックオフ・shouldTryPublicDns の elapsed、すべてこの
+ *   基準（再起動直後の新ホストで即 public DNS フォールバックしてしまわないため）。
+ *
+ * 再利用中（given）の cloudflared も自動再起動（乗っ取り）の対象。canAutoRestart は常に true
+ * （restartCloudflared が cfHandle.child の有無で owned/given を分岐する）。
+ *
+ * ループの末尾は「再起動する/しない/できない」のどの分岐を通っても必ず合流する1本だけで、
+ * sleep(tunnelPollDelayMs(...)) をここで必ず1回だけ通ってからループ先頭に戻る
+ * （バスループ＝再起動上限到達後に sleep なしで即次プローブへ進む経路を作らないこと）。
  */
-async function verifyTunnel(url, token) {
-  const budgetMs = Number.parseInt(process.env.REHEARSE_TUNNEL_WAIT_MS ?? '', 10) || 180_000;
-  const budgetS = Math.round(budgetMs / 1000);
+async function verifyTunnel(initialUrl, token, cfHandle) {
+  const budgetMs = Number.parseInt(process.env.REHEARSE_TUNNEL_WAIT_MS ?? '', 10) || 240_000;
+  const stallMs = Number.parseInt(process.env.REHEARSE_TUNNEL_STALL_MS ?? '', 10) || 50_000;
+  const maxRestarts = Number.parseInt(process.env.REHEARSE_TUNNEL_MAX_RESTARTS ?? '', 10) || 2;
   const fallbackAfterMs =
     Number.parseInt(process.env.REHEARSE_DNS_FALLBACK_MS ?? '', 10) || 20_000;
-  const host = new URL(url).hostname;
+  const canAutoRestart = true; // given でも乗っ取りにより再起動可能になった
+
   const resolver = new dns.promises.Resolver({ timeout: 3_000, tries: 2 });
+  const overallStart = Date.now();
+  let attemptStart = overallStart;
+  let restartCount = 0;
+  let url = initialUrl;
   let usingPublicDns = false;
-  const start = Date.now();
   let attempt = 0;
 
   for (;;) {
+    if (Date.now() - overallStart >= budgetMs) {
+      haltTunnelUnpropagated(
+        url,
+        token,
+        `トンネル越し GET /api/tags が上限 ${Math.round(budgetMs / 1000)}s 以内に 200＋期待形状になりませんでした`,
+      );
+    }
+
     attempt++;
-    const elapsed = Date.now() - start;
-    const elapsedS = Math.round(elapsed / 1000);
+    // 再起動後の反映漏れ防止のため、host は毎イテレーション url から再計算する。
+    const host = new URL(url).hostname;
+    const attemptElapsedForDns = Date.now() - attemptStart;
 
     // --- 1) readiness: c-ares でトンネル host を直問い合わせ（mDNSResponder を飛ばす）---
     let addrs = [];
@@ -956,15 +1205,16 @@ async function verifyTunnel(url, token) {
     }
 
     // システム servers で引けない状態が fallbackAfterMs 続いたら public DNS へ（1回だけ）。
+    // elapsed は attemptStart 基準（再起動直後の新ホストで即フォールバックしないため）。
     if (
       (dnsErr || addrs.length === 0) &&
       !usingPublicDns &&
-      shouldTryPublicDns(elapsed, fallbackAfterMs)
+      shouldTryPublicDns(attemptElapsedForDns, fallbackAfterMs)
     ) {
       usingPublicDns = true;
       resolver.setServers(PUBLIC_DNS_SERVERS);
       log(
-        `  DNS: システム servers で ${elapsedS}s 解決できず → ${PUBLIC_DNS_SERVERS.join(
+        `  DNS: システム servers で ${Math.round(attemptElapsedForDns / 1000)}s 解決できず → ${PUBLIC_DNS_SERVERS.join(
           ', ',
         )} にフォールバック`,
       );
@@ -976,79 +1226,93 @@ async function verifyTunnel(url, token) {
       }
     }
 
-    if (dnsErr || addrs.length === 0) {
-      const desc = dnsFailureHint(dnsErr || 'ENODATA');
-      const via = usingPublicDns ? ' via public DNS' : '';
-      // フォールバック再 resolve の分を含めて経過を採り直す（オーバーシュート抑制）。
-      const now = Date.now() - start;
-      const nowS = Math.round(now / 1000);
-      if (now >= budgetMs) {
-        haltTunnelUnpropagated(
-          url,
-          token,
-          `トンネル host (${host}) が上限 ${budgetS}s 以内に DNS 解決できませんでした（最後: ${desc}${via}）`,
-        );
-      }
-      log(`  トンネル検証待ち ${nowS}s / 上限 ${budgetS}s (DNS ${desc}${via})`);
-      await sleep(tunnelPollDelayMs(now));
-      continue;
-    }
-
-    // --- 2) HTTP プローブ: 事前解決した IP を順に試す（SNI / Host は host 名のまま）---
+    // --- 2) HTTP プローブ（DNS 成功時のみ。事前解決した IP を順に試す。SNI / Host は host 名のまま）---
     let errCode = null;
     let status = null;
     let bodyPrefix = null;
     let shaped = false;
-    for (const ip of addrs) {
-      // resolve4 / フォールバックで budget を食い切っていたら残り IP は試さない。
-      if (Date.now() - start >= budgetMs) break;
-      try {
-        const r = await probeTagsViaIp(url, host, ip, bearer(token), 5000);
-        status = r.status;
-        bodyPrefix = (r.text || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-        shaped =
-          status === 200 &&
-          r.json &&
-          Array.isArray(r.json.models) &&
-          tagsHasModel(r.json, REHEARSAL_MODEL);
-        errCode = null;
-        if (shaped || (status !== null && isTunnelFatalStatus(status))) break;
-      } catch (e) {
-        errCode = e?.cause?.code || e?.code || e?.name || 'ERR';
+    if (!dnsErr && addrs.length > 0) {
+      for (const ip of addrs) {
+        try {
+          const r = await probeTagsViaIp(url, host, ip, bearer(token), 5000);
+          status = r.status;
+          bodyPrefix = (r.text || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+          shaped =
+            status === 200 &&
+            r.json &&
+            Array.isArray(r.json.models) &&
+            tagsHasModel(r.json, REHEARSAL_MODEL);
+          errCode = null;
+          if (shaped || (status !== null && isTunnelFatalStatus(status))) break;
+        } catch (e) {
+          errCode = e?.cause?.code || e?.code || e?.name || 'ERR';
+        }
       }
     }
 
-    // 経過はイテレーション先頭ではなくプローブ完了時点で採り直す（オーバーシュート抑制）。
-    const now = Date.now() - start;
-    const nowS = Math.round(now / 1000);
+    const attemptElapsedMs = Date.now() - attemptStart;
+    const overallElapsedMs = Date.now() - overallStart;
+    const classification = classifyTunnelProbe({ status, shaped });
+    const desc =
+      dnsErr || addrs.length === 0
+        ? dnsFailureHint(dnsErr || 'ENODATA')
+        : describeTunnelProbe({ errCode, status, bodyPrefix });
 
-    if (shaped) {
+    appendTunnelAttemptLog({
+      ts: Date.now(),
+      restartCount,
+      attemptElapsedMs,
+      overallElapsedMs,
+      classification,
+      status,
+      usingPublicDns,
+      host,
+    });
+
+    if (classification === 'SUCCESS') {
       log(
-        `  トンネル検証 OK (${nowS}s / ${attempt} 回目${
+        `  トンネル検証 OK (${Math.round(overallElapsedMs / 1000)}s / ${attempt} 回目${
           usingPublicDns ? ' / public DNS' : ''
         })`,
       );
-      return;
+      return url;
     }
 
-    const desc = describeTunnelProbe({ errCode, status, bodyPrefix });
-
-    // 401 は待っても直らない（トークン不一致）。即打ち切り。
-    if (status !== null && isTunnelFatalStatus(status)) {
-      log(`  トンネル検証 ${nowS}s (${desc})`);
-      haltTunnelUnpropagated(url, token, `トンネル検証で ${desc}（待っても直りません）`);
-    }
-
-    if (now >= budgetMs) {
+    if (classification === 'FATAL') {
       haltTunnelUnpropagated(
         url,
         token,
-        `トンネル越し GET /api/tags が上限 ${budgetS}s 以内に 200＋期待形状になりませんでした（最後: ${desc}）`,
+        `トンネル検証で ${describeTunnelProbe({ status })}（待っても直りません）`,
       );
     }
 
-    log(`  トンネル検証待ち ${nowS}s / 上限 ${budgetS}s (DNS ${addrs.join(', ')} / ${desc})`);
-    await sleep(tunnelPollDelayMs(now));
+    // PENDING
+    if (
+      shouldRestartCloudflared({
+        classification,
+        attemptElapsedMs,
+        stallMs,
+        restartCount,
+        maxRestarts,
+        canAutoRestart,
+      })
+    ) {
+      restartCount++;
+      url = await restartCloudflared(cfHandle); // kill→respawn→URL採取→config set --url。戻り値の url で上書き
+      attemptStart = Date.now();
+      usingPublicDns = false;
+    }
+    // ↑ どの分岐でもここから先は共通の1本の末尾に合流する（バスループ回避）。
+
+    log(
+      `  トンネル検証待ち ${Math.round((Date.now() - overallStart) / 1000)}s / 上限 ${Math.round(
+        budgetMs / 1000,
+      )}s (${desc}${usingPublicDns ? ' / public DNS' : ''}${
+        cfHandle?.hijackedFromGiven ? ' / hijacked-from-given' : ''
+      } / restart ${restartCount}/${maxRestarts})`,
+    );
+    await sleep(tunnelPollDelayMs(Date.now() - attemptStart)); // 必ずここを1回だけ通る
+    // continue せず for ループの先頭へ戻るだけ。
   }
 }
 
@@ -1373,22 +1637,27 @@ async function main() {
     }
 
     let tunnelUrl;
+    let cfHandle;
     if (cfPlan.action === 'start') {
       state.startedCloudflared = true;
-      tunnelUrl = await captureTunnelUrl(startCloudflared());
+      const cfChild = startCloudflared();
+      cfHandle = { child: cfChild };
+      tunnelUrl = await captureTunnelUrl(cfChild);
       log(`  cloudflared 起動、URL 採取: ${tunnelUrl}`);
     } else {
       // resolveCloudflared() が Phase 1 で対話入力済み。
       tunnelUrl = cfPlan.url;
       state.reusedCloudflaredPid = cfPlan.pid;
+      cfHandle = { child: null, givenPid: cfPlan.pid }; // hijack前はchildなし
       log(`  既存トンネルを使用: ${tunnelUrl}`);
     }
 
     const setUrl = runSusumai(['config', 'set', '--url', tunnelUrl]);
     if (setUrl.status !== 0) halt(`config set --url に失敗しました\n${setUrl.stderr}`);
 
-    log('\n=== Phase 3b: トンネル検証（エッジ伝播待ち・上限 180s）===');
-    await verifyTunnel(tunnelUrl, token);
+    log('\n=== Phase 3b: トンネル検証（エッジ伝播待ち）===');
+    // 再起動が発生すると URL が変わるので、以降のフェーズ用に戻り値で上書きする。
+    tunnelUrl = await verifyTunnel(tunnelUrl, token, cfHandle);
 
     log('\n=== Phase 4: 自動検証（ワンショット / パイプ / 死んだトンネル）===');
     await autoVerify();

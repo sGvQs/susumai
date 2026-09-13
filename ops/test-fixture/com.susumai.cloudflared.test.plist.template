@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  susumai hosting.sh 検証用のモック cloudflared LaunchAgent テンプレート。
+  ラベル・起動引数のいずれも本番 com.susumai.cloudflared とは構造的に別物にすることで、
+  hosting.sh の検証が本番に物理的に触れられないようにするためのフィクスチャ
+  （ops/test-fixture/README.md 参照）。
+
+  本番テンプレート(ops/com.susumai.cloudflared.plist.template)との違い:
+    - Label が com.susumai.cloudflared.test（文字列として本番と完全に別物）
+    - ProgramArguments がモック(ops/test-fixture/mock-cloudflared.sh)を指し、
+      引数も --tunnel-run susumai-test-tunnel で本番の
+      "cloudflared tunnel run susumai-prod" とは pgrep -f 上で絶対に混同されない
+    - RunAtLoad=false（ログイン時に毎回勝手に立ち上がらないようにする。
+      テスト実行者が明示的に bootstrap したときだけ動く）
+    - KeepAlive=true は本番と同じ挙動を再現するために維持する
+
+  __PLACEHOLDER__ を sed で埋めて実ファイル化してから使う（コミットするのは
+  このテンプレートのみ。実 home パス入りの .plist はコミットしない）。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.susumai.cloudflared.test</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__REPO_DIR__/ops/test-fixture/mock-cloudflared.sh</string>
+    <string>--tunnel-run</string>
+    <string>susumai-test-tunnel</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_DIR__</string>
+
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__CF_STDOUT_LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__CF_STDERR_LOG__</string>
+</dict>
+</plist>
