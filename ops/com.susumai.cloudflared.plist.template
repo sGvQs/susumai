@@ -2,8 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   susumai 本番トンネル（named tunnel: __TUNNEL_NAME__ = susumai-prod）の launchd テンプレート（段階3）。
-  参照用。実際の常駐は `cloudflared service install` が自前の LaunchDaemon を作る。
-  自前で LaunchAgent 化したい場合だけこのテンプレートを sed で埋めて使う。
+  実際の常駐はこのテンプレートを sed で埋めて生成した gui LaunchAgent
+  `com.susumai.cloudflared` として稼働している（`cloudflared service install` は
+  使っていない。tunnel作成直後の一時的な動作確認にのみ使うことがある）。
   placeholder のみ。実 home パス入りの .plist はコミットしない（ops/README.md 参照）。
 -->
 <plist version="1.0">

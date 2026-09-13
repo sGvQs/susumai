@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  susumai hosting.sh 検証用のモック proxy LaunchAgent テンプレート。
+  ラベル・ポート・URL のいずれも本番 com.susumai.proxy とは構造的に別物にすることで、
+  hosting.sh の検証が本番に物理的に触れられないようにするためのフィクスチャ
+  （ops/test-fixture/README.md 参照）。
+
+  本番テンプレート(ops/com.susumai.proxy.plist.template)との違い:
+    - Label が com.susumai.proxy.test（文字列として本番と完全に別物）
+    - ProgramArguments がモック(ops/test-fixture/mock-proxy.mjs)を指す
+    - RunAtLoad=false（ログイン時に毎回勝手に立ち上がらないようにする。
+      テスト実行者が明示的に bootstrap したときだけ動く）
+    - KeepAlive=true は本番と同じ挙動を再現するために維持する
+
+  __PLACEHOLDER__ を sed で埋めて実ファイル化してから使う（コミットするのは
+  このテンプレートのみ。実 home パス入りの .plist はコミットしない）。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.susumai.proxy.test</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BIN__</string>
+    <string>__REPO_DIR__/ops/test-fixture/mock-proxy.mjs</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_DIR__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MOCK_PROXY_PORT</key>
+    <string>__MOCK_PROXY_PORT__</string>
+    <key>MOCK_PROXY_SHUTDOWN_DELAY_MS</key>
+    <string>__MOCK_PROXY_SHUTDOWN_DELAY_MS__</string>
+  </dict>
+
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__STDOUT_LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__STDERR_LOG__</string>
+</dict>
+</plist>

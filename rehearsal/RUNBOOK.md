@@ -78,9 +78,9 @@ rehearse が壊れているなら、直すのは rehearse であって proxy.mjs
 rehearse を通したいなら本番を止める:
 
 ```sh
-launchctl bootout gui/$(id -u)/com.susumai.proxy                                   # 停止
-npm run rehearse                                                                    # 検証
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.susumai.proxy.plist     # 復帰
+ops/hosting.sh down --target proxy   # 停止
+npm run rehearse                     # 検証
+ops/hosting.sh up   --target proxy   # 復帰
 ```
 
 `pkill` は使わない。`KeepAlive=true` なので launchd が即 respawn し、収束にならない。
