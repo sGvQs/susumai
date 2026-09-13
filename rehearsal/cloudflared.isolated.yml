@@ -1,0 +1,12 @@
+# rehearsal 用 cloudflared quick tunnel 隔離 config（rehearse.mjs 専用。手で叩かない）。
+#
+# なぜ必要か: cloudflared は --config 未指定だと既定パス（~/.cloudflared/config.yml）を
+# 自動で読みに行く。このマシンにはそこに本番 named tunnel（com.susumai.cloudflared）用の
+# 設定があり、ingress の catch-all（`service: http_status:404`）が hostname 不一致（quick
+# tunnel は毎回ランダムな *.trycloudflare.com）を全部 404 で弾く。つまり --config を省略すると
+# quick tunnel が本番設定を巻き込んで即座に 404 を返し続ける（2026-09-13 実機で確認）。
+# rehearse.mjs はこのファイルを必ず --config で明示指定し、本番 config.yml には一切触れない。
+#
+# 内容は quick tunnel（--url）が要求する最小限: ingress を持たない空マッピング。
+# tunnel / credentials-file 等の named tunnel 固有キーは意図的に書かない。
+{}

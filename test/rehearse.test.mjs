@@ -13,6 +13,9 @@ import {
   tagsHasModel,
   tunnelPollDelayMs,
   isTunnelFatalStatus,
+  classifyTunnelProbe,
+  shouldRestartCloudflared,
+  classifyGivenCloudflaredIdentity,
   describeTunnelProbe,
   isPerRunCloudflaredLog,
   dnsFailureHint,
@@ -96,6 +99,92 @@ test('isTunnelFatalStatus: 401 のみ即打ち切り', () => {
   assert.equal(isTunnelFatalStatus(null), false);
 });
 
+test('classifyTunnelProbe: shaped は SUCCESS（status を問わず優先）', () => {
+  assert.equal(classifyTunnelProbe({ status: 200, shaped: true }), 'SUCCESS');
+  assert.equal(classifyTunnelProbe({ status: null, shaped: true }), 'SUCCESS');
+});
+
+test('classifyTunnelProbe: 401 は shaped でなければ FATAL', () => {
+  assert.equal(classifyTunnelProbe({ status: 401, shaped: false }), 'FATAL');
+});
+
+test('classifyTunnelProbe: 5xx は特別扱いせず PENDING（伝播成立と断定しない）', () => {
+  assert.equal(classifyTunnelProbe({ status: 502, shaped: false }), 'PENDING');
+  assert.equal(classifyTunnelProbe({ status: 503, shaped: false }), 'PENDING');
+  assert.equal(classifyTunnelProbe({ status: 504, shaped: false }), 'PENDING');
+});
+
+test('classifyTunnelProbe: DNS 失敗（status なし）・その他 4xx も PENDING', () => {
+  assert.equal(classifyTunnelProbe({ status: null, shaped: false }), 'PENDING');
+  assert.equal(classifyTunnelProbe({ status: 404, shaped: false }), 'PENDING');
+  assert.equal(classifyTunnelProbe({ status: 403, shaped: false }), 'PENDING');
+});
+
+test('shouldRestartCloudflared: PENDING かつ canAutoRestart かつ STALL 到達かつ上限未満で true', () => {
+  assert.equal(
+    shouldRestartCloudflared({
+      classification: 'PENDING',
+      attemptElapsedMs: 50_000,
+      stallMs: 50_000,
+      restartCount: 0,
+      maxRestarts: 2,
+      canAutoRestart: true,
+    }),
+    true,
+  );
+});
+
+test('shouldRestartCloudflared: SUCCESS/FATAL は false（分類が PENDING でなければ再起動しない）', () => {
+  const base = {
+    attemptElapsedMs: 60_000,
+    stallMs: 50_000,
+    restartCount: 0,
+    maxRestarts: 2,
+    canAutoRestart: true,
+  };
+  assert.equal(shouldRestartCloudflared({ ...base, classification: 'SUCCESS' }), false);
+  assert.equal(shouldRestartCloudflared({ ...base, classification: 'FATAL' }), false);
+});
+
+test('shouldRestartCloudflared: canAutoRestart=false は false（given 再利用中は自動再起動しない）', () => {
+  assert.equal(
+    shouldRestartCloudflared({
+      classification: 'PENDING',
+      attemptElapsedMs: 60_000,
+      stallMs: 50_000,
+      restartCount: 0,
+      maxRestarts: 2,
+      canAutoRestart: false,
+    }),
+    false,
+  );
+});
+
+test('shouldRestartCloudflared: STALL 未到達・非有限は false', () => {
+  const base = {
+    classification: 'PENDING',
+    stallMs: 50_000,
+    restartCount: 0,
+    maxRestarts: 2,
+    canAutoRestart: true,
+  };
+  assert.equal(shouldRestartCloudflared({ ...base, attemptElapsedMs: 49_999 }), false);
+  assert.equal(shouldRestartCloudflared({ ...base, attemptElapsedMs: NaN }), false);
+});
+
+test('shouldRestartCloudflared: restartCount が maxRestarts 以上なら false（再起動上限）', () => {
+  const base = {
+    classification: 'PENDING',
+    attemptElapsedMs: 60_000,
+    stallMs: 50_000,
+    maxRestarts: 2,
+    canAutoRestart: true,
+  };
+  assert.equal(shouldRestartCloudflared({ ...base, restartCount: 2 }), false);
+  assert.equal(shouldRestartCloudflared({ ...base, restartCount: 3 }), false);
+  assert.equal(shouldRestartCloudflared({ ...base, restartCount: 1 }), true);
+});
+
 test('describeTunnelProbe: fetch cause code → 文言', () => {
   assert.match(describeTunnelProbe({ errCode: 'ENOTFOUND' }), /ENOTFOUND.*DNS/);
   assert.match(describeTunnelProbe({ errCode: 'UND_ERR_HEADERS_TIMEOUT' }), /ヘッダ応答なし/);
@@ -165,6 +254,31 @@ test('classifyProxyListener: 別プロセスは halt', () => {
 test('classifyProxyListener: 空は halt', () => {
   assert.equal(classifyProxyListener('').ok, false);
   assert.equal(classifyProxyListener(null).ok, false);
+});
+
+// --- given cloudflared の身元判定（乗っ取り前後の SIGTERM/SIGKILL 直前確認） ------------
+
+test('classifyGivenCloudflaredIdentity: :8787 トンネルの cloudflared は ok', () => {
+  const r = classifyGivenCloudflaredIdentity('cloudflared tunnel --url http://localhost:8787');
+  assert.equal(r.ok, true);
+});
+
+test('classifyGivenCloudflaredIdentity: cloudflared でなければ ok=false', () => {
+  const r = classifyGivenCloudflaredIdentity('nginx: master process /usr/sbin/nginx');
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /cloudflared ではありません/);
+});
+
+test('classifyGivenCloudflaredIdentity: cloudflared だが :8787 以外は ok=false', () => {
+  const r = classifyGivenCloudflaredIdentity('cloudflared tunnel run my-prod-tunnel');
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /:8787 向けトンネルではありません/);
+});
+
+test('classifyGivenCloudflaredIdentity: 空/null は ok=false（プロセス消失想定）', () => {
+  assert.equal(classifyGivenCloudflaredIdentity('').ok, false);
+  assert.equal(classifyGivenCloudflaredIdentity(null).ok, false);
+  assert.match(classifyGivenCloudflaredIdentity('').reason, /プロセス消失/);
 });
 
 test('classifyProxyAuth: 200 かつ token あり → ok', () => {

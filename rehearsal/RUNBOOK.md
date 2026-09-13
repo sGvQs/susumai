@@ -33,7 +33,7 @@ REPL は別端末で叩く。rehearse が Phase 5 で起動コマンド（`XDG_C
 | 既存トンネルの URL が復元できない | rehearse は per-run ログから復帰を試みる。ダメなら落として再実行 |
 | Phase 2 の install / typecheck / test / build のいずれか失敗 | その出力を確認（rehearse のバグではなくコード側） |
 | proxy は listening だが `:8787` が 200 を返さない | 上流 Ollama（トークン / モデル）を確認 |
-| トンネル検証が上限（180s）で失敗、末尾が `ENOTFOUND` | ほぼ DNS ブロック → §4 |
+| トンネル検証が上限（既定値は `REHEARSE_TUNNEL_WAIT_MS` 参照）で失敗、末尾が `ENOTFOUND` | ほぼ DNS ブロック → §4 |
 
 ## 3. 撤収
 
@@ -43,7 +43,7 @@ REPL は別端末で叩く。rehearse が Phase 5 で起動コマンド（`XDG_C
 
 ## 4. `trycloudflare.com` が DNS で引けない（2026-09-04 に実際に踏んだ）
 
-- **症状**: `dig <url>` が `status: REFUSED` / `not found`、`npm run rehearse` がトンネル検証で `ENOTFOUND` のまま 180s 失敗する
+- **症状**: `dig <url>` が `status: REFUSED` / `not found`、`npm run rehearse` がトンネル検証で `ENOTFOUND` のまま上限（既定値は `REHEARSE_TUNNEL_WAIT_MS` 参照）失敗する
 - **原因**: ISP や社内の DNS が `*.trycloudflare.com` を丸ごとブロックしている（フィッシング／マルウェア悪用対策）。**マシンではなく、そのネットワークの DNS の問題**
 - **対処**: そのマシンの DNS を `1.1.1.1` / `8.8.8.8` に変える（システム設定 → ネットワーク → DNS）。または quick tunnel をやめて named tunnel（自分のドメイン）にする。別マシンから使う側も同じ
 
