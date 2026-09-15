@@ -13,3 +13,11 @@ rehearsal/*.state.json
 ops/*.plist
 !ops/*.plist.template
 ops/*.log
+
+# 運用ダッシュボード（ops/dashboard.mjs）が実行時に生成する状態ファイル
+ops/dashboard-last-critical.json
+
+# Playwright（e2e/）の実行成果物
+/test-results/
+/playwright-report/
+/playwright/.cache/

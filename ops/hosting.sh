@@ -77,6 +77,7 @@ BOOTSTRAP_ERR=""
 
 COMMAND=""
 TARGET=""
+JSON_MODE="false"
 # --grace-timeout / --readiness-timeout の既定値は未検証の初期値。
 # ストリーミング応答中は proxy が grace_timeout 以内に自然終了しない可能性がある。
 GRACE_TIMEOUT=15
@@ -89,10 +90,15 @@ log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 usage() {
   cat <<'EOF'
 使い方:
-  ops/hosting.sh up   --target {proxy|cloudflared|all} [--grace-timeout SEC] [--readiness-timeout SEC]
-  ops/hosting.sh down --target {proxy|cloudflared|all} [--grace-timeout SEC]
+  ops/hosting.sh up     --target {proxy|cloudflared|all} [--grace-timeout SEC] [--readiness-timeout SEC]
+  ops/hosting.sh down   --target {proxy|cloudflared|all} [--grace-timeout SEC]
+  ops/hosting.sh status --target {proxy|cloudflared|all} [--json]
 
 --target は必須（省略不可）。
+status は read-only（launchctl print / curl による確認のみ）で、副作用を
+一切持たない。引数が正しい限り常に exit 0 で終了し、個別ターゲットの異常
+（未ロード・不健全等）は非ゼロ終了ではなく JSON/テキストのフィールドとして
+表現する。
 --grace-timeout      既定 15 秒（未検証の初期値。bootout 後の自然終了を待つ上限）
 --readiness-timeout  既定 10 秒（未検証の初期値。up のみ。bootstrap 後の健全性待ち上限）
 
@@ -430,6 +436,71 @@ cmd_down() {
   exit 0
 }
 
+# --- status（read-only。abort() は一切呼ばず、query()/health() のみを使う） ----
+
+# json_escape(str): ダブルクォート/バックスラッシュのみエスケープする。
+# state 文字列は launchctl print の "state = X" 行由来の英単語のみなので
+# これで十分（制御文字混入は想定しない）。
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+# ts_now(): ローカルタイムゾーン付き ISO8601 (例: 2026-09-13T21:03:00+09:00)。
+# BSD date の %z はコロン無し(+0900)を返すため、コロンを挿入して整形する。
+ts_now() {
+  local raw
+  raw=$(date +'%Y-%m-%dT%H:%M:%S%z')
+  printf '%s:%s\n' "${raw:0:22}" "${raw:22:2}"
+}
+
+cmd_status() {
+  local short healthy_all="true" first="true" pid_json state_json healthy_json loaded_json
+
+  if [[ "$JSON_MODE" == "true" ]]; then
+    printf '{\n  "ts": "%s",\n  "targets": {\n' "$(ts_now)"
+  else
+    echo "=== status ==="
+  fi
+
+  for short in "${TARGET_LABELS[@]}"; do
+    if health "$short"; then
+      healthy_json="true"
+    else
+      healthy_json="false"
+      healthy_all="false"
+    fi
+    loaded_json="$QUERY_LOADED"
+    state_json="$(json_escape "$QUERY_STATE")"
+    if [[ -n "$QUERY_PID" ]]; then
+      pid_json="$QUERY_PID"
+    else
+      pid_json="null"
+    fi
+
+    if [[ "$JSON_MODE" == "true" ]]; then
+      if [[ "$first" != "true" ]]; then
+        printf ',\n'
+      fi
+      first="false"
+      printf '    "%s": {"loaded": %s, "state": "%s", "pid": %s, "healthy": %s}' \
+        "$short" "$loaded_json" "$state_json" "$pid_json" "$healthy_json"
+    else
+      printf '  %-12s loaded=%-5s state=%-14s pid=%-8s healthy=%s\n' \
+        "$short" "$loaded_json" "$QUERY_STATE" "${QUERY_PID:-N/A}" "$healthy_json"
+    fi
+  done
+
+  if [[ "$JSON_MODE" == "true" ]]; then
+    printf '\n  },\n  "overallHealthy": %s\n}\n' "$healthy_all"
+  else
+    printf 'overallHealthy: %s\n' "$healthy_all"
+  fi
+  exit 0
+}
+
 main() {
   if [[ $# -lt 1 ]]; then
     usage
@@ -438,7 +509,7 @@ main() {
   COMMAND="$1"
   shift
   case "$COMMAND" in
-    up|down) ;;
+    up|down|status) ;;
     *)
       usage
       exit 1
@@ -458,6 +529,10 @@ main() {
       --readiness-timeout)
         READINESS_TIMEOUT="${2:-}"
         shift 2
+        ;;
+      --json)
+        JSON_MODE="true"
+        shift
         ;;
       *)
         usage
@@ -486,11 +561,14 @@ main() {
     exit 1
   fi
 
-  set_target_labels "$TARGET" "$COMMAND"
-
-  if [[ "$COMMAND" == "up" ]]; then
+  if [[ "$COMMAND" == "status" ]]; then
+    set_target_labels "$TARGET" "up"
+    cmd_status
+  elif [[ "$COMMAND" == "up" ]]; then
+    set_target_labels "$TARGET" "$COMMAND"
     cmd_up
   else
+    set_target_labels "$TARGET" "$COMMAND"
     cmd_down
   fi
 }
