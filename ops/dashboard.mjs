@@ -662,12 +662,12 @@ const INDEX_HTML = `<!doctype html>
   .os-toolbar-title {
     font-size: 12px;
     font-weight: 700;
+    letter-spacing: 0.4px;
     color: #33465c;
     text-shadow: 0 1px 0 rgba(255,255,255,0.6);
     white-space: nowrap;
     margin-right: 10px;
   }
-  .toolbar-label { font-size: 11px; color: #56626f; font-weight: 600; }
   .toolbar-spacer { flex: 1; }
 
   .banner {
@@ -682,11 +682,22 @@ const INDEX_HTML = `<!doctype html>
   /* [hidden] は author の display 宣言（同じ normal 優先度）に負けて無効化されうるため、
      hidden 属性側にも明示的な display:none を与えて確実に隠す。 */
   .banner[hidden] { display: none; }
-  .banner button {
-    background: linear-gradient(180deg, #ffffff, #e7e7e7); color: #b71c1c; border: 1px solid rgba(0,0,0,0.2);
-    padding: 6px 12px; border-radius: 6px; cursor: pointer; font-weight: 600;
-    box-shadow: 0 1px 0 rgba(255,255,255,0.7) inset;
+  #ack-critical-btn {
+    position: relative; overflow: hidden; isolation: isolate;
+    background: linear-gradient(180deg, #ffffff 0%, #f4f5f6 45%, #dfe3e7 100%);
+    color: #b71c1c; border: 1px solid rgba(0,0,0,0.25);
+    padding: 6px 12px; border-radius: 999px; cursor: pointer; font-weight: 700;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.7) inset, 0 1px 2px rgba(0,0,0,0.15);
   }
+  #ack-critical-btn::before {
+    content: ''; position: absolute; left: 2px; right: 2px; top: 1px; height: 45%;
+    border-radius: 999px / 100%;
+    background: linear-gradient(180deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0) 100%);
+    pointer-events: none;
+  }
+  #ack-critical-btn:hover { filter: brightness(1.04); }
+  #ack-critical-btn:active { box-shadow: 0 1px 2px rgba(0,0,0,0.2) inset; transform: translateY(1px); }
+  #ack-critical-btn:active::before { opacity: 0.6; }
 
   /* --- 本体: 左サイドバー + 右ペイン（Disk Utility の左右2ペイン構成） --------- */
   .os-body {
@@ -836,15 +847,32 @@ const INDEX_HTML = `<!doctype html>
   .log-rehearse { color: #90caf9; }
   .log-up { color: #a5d6a7; }
 
+  /* --- Aqua「ジェリービーンズ」ボタン ------------------------------------------
+   * 2000年代初期 Mac OS X の標準ダイアログボタン（例: Cancel/Open）を参照した
+   * 質感強化。色相（本番操作である危険性を示す赤系統）は変更せず、上半分に
+   * ガラス玉・水滴のような強いハイライトを重ね、下半分にかけて彩度を上げることで
+   * 「ぷっくりした」立体感を表現する（後藤さんフィードバック 2026-09-15）。
+   * ::before はハイライト層のみを描画する装飾用で、DOM の id/class 契約・
+   * クリック挙動には影響しない（pointer-events: none）。 --- */
   button.primary {
-    background: linear-gradient(180deg, #ff9d8f 0%, #e5493a 50%, #c0281a 100%);
+    position: relative; overflow: hidden; isolation: isolate;
+    background: linear-gradient(180deg, #ffcabd 0%, #ff8069 22%, #e5493a 55%, #b8230f 100%);
     color: #fff; border: 1px solid #7a160c; padding: 10px 20px; border-radius: 999px;
-    font-size: 13px; cursor: pointer; font-weight: 600;
-    box-shadow: 0 1px 0 rgba(255,255,255,0.5) inset, 0 2px 3px rgba(0,0,0,0.2);
-    text-shadow: 0 1px 1px rgba(0,0,0,0.3);
+    font-size: 13px; cursor: pointer; font-weight: 700;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.4) inset, 0 2px 4px rgba(0,0,0,0.25), 0 0 0 1px rgba(255,90,70,0.35);
+    text-shadow: 0 1px 1px rgba(0,0,0,0.35);
   }
+  button.primary::before {
+    content: ''; position: absolute; left: 2px; right: 2px; top: 1px; height: 56%;
+    border-radius: 999px / 100%;
+    background: linear-gradient(180deg, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0.35) 65%, rgba(255,255,255,0) 100%);
+    pointer-events: none;
+  }
+  button.primary:hover { filter: brightness(1.04); }
   button.primary:active { box-shadow: 0 1px 2px rgba(0,0,0,0.3) inset; transform: translateY(1px); }
+  button.primary:active::before { opacity: 0.6; }
   button.primary:disabled { background: #b7bec6; color: #eee; border-color: #99a1a9; cursor: not-allowed; box-shadow: none; }
+  button.primary:disabled::before { display: none; }
 
   .modal-overlay {
     position: fixed; inset: 0; background: rgba(10,20,35,0.55);
@@ -870,19 +898,50 @@ const INDEX_HTML = `<!doctype html>
   .modal .warn { color: #b71c1c; font-size: 12px; font-weight: 600; }
   .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
   .modal .actions button {
+    position: relative; overflow: hidden; isolation: isolate;
     padding: 8px 16px; border-radius: 999px; border: 1px solid rgba(0,0,0,0.3); cursor: pointer;
-    font-size: 12px; font-weight: 600; box-shadow: 0 1px 0 rgba(255,255,255,0.5) inset;
+    font-size: 12px; font-weight: 700; box-shadow: 0 1px 0 rgba(255,255,255,0.5) inset;
   }
-  .modal .cancel-btn { background: linear-gradient(180deg, #fdfdfd, #dfe3e7); color: #333; }
-  .modal .run-btn { background: linear-gradient(180deg, #ff9d8f, #c0281a); color: #fff; text-shadow: 0 1px 1px rgba(0,0,0,0.3); }
+  /* .modal .actions button::before はハイライト層のみを描画する装飾用（button.primary
+     と同じ手法）。DOM の id/class 契約・クリック挙動には影響しない。 */
+  .modal .actions button::before {
+    content: ''; position: absolute; left: 2px; right: 2px; top: 1px; height: 50%;
+    border-radius: 999px / 100%;
+    pointer-events: none;
+  }
+  .modal .cancel-btn {
+    background: linear-gradient(180deg, #ffffff 0%, #f4f5f6 45%, #dfe3e7 100%);
+    color: #333; border-color: rgba(0,0,0,0.25);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.7) inset, 0 1px 2px rgba(0,0,0,0.12);
+  }
+  .modal .cancel-btn::before {
+    background: linear-gradient(180deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0) 100%);
+  }
+  /* #ack-critical-btn と同系統（白〜グレーのジェリービーンズ）のため、押下時の
+     沈み込み影も #ack-critical-btn:active と同じ濃さで揃える。 */
+  .modal .cancel-btn:active { box-shadow: 0 1px 2px rgba(0,0,0,0.2) inset; }
+  .modal .run-btn {
+    background: linear-gradient(180deg, #ffcabd 0%, #ff8069 22%, #e5493a 55%, #b8230f 100%);
+    color: #fff; text-shadow: 0 1px 1px rgba(0,0,0,0.35); border-color: #7a160c;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.4) inset, 0 2px 3px rgba(0,0,0,0.2), 0 0 0 1px rgba(255,90,70,0.35);
+  }
+  .modal .run-btn::before {
+    background: linear-gradient(180deg, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0.35) 65%, rgba(255,255,255,0) 100%);
+  }
+  /* button.primary と同系統（赤のジェリービーンズ）のため、押下時の沈み込み影も
+     button.primary:active と同じ濃さで揃える。 */
+  .modal .run-btn:active { box-shadow: 0 1px 2px rgba(0,0,0,0.3) inset; }
+  .modal .actions button:hover { filter: brightness(1.04); }
+  .modal .actions button:active { transform: translateY(1px); }
+  .modal .actions button:active::before { opacity: 0.6; }
   .modal button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .modal button:disabled::before { display: none; }
 </style>
 </head>
 <body>
   <div class="os-window">
     <div class="os-toolbar">
-      <span class="os-toolbar-title">susumai 運用ダッシュボード</span>
-      <span class="toolbar-label">実行状況</span>
+      <span class="os-toolbar-title">susumai</span>
       <div class="toolbar-spacer"></div>
       <div class="aqua-progress-track" id="progress-track">
         <div class="aqua-progress-fill"></div>

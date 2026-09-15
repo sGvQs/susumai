@@ -36,7 +36,7 @@ test.describe('トップページの基本要素', () => {
 
     // タイトルバーは廃止済み。アプリ名はツールバー左端の .os-toolbar-title に移設されている。
     await expect(page.locator('.os-titlebar')).toHaveCount(0);
-    await expect(page.locator('.os-toolbar-title')).toHaveText('susumai 運用ダッシュボード');
+    await expect(page.locator('.os-toolbar-title')).toHaveText('susumai');
 
     // 左サイドバー: 監視対象一覧（proxy / cloudflared / Ollama）
     await expect(page.locator('#sidebar-item-proxy')).toBeVisible();
